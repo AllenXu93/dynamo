@@ -77,24 +77,44 @@ When both modes are enabled, throughput-based scaling provides a capacity floor 
 
 ### Default Mode (zero config)
 
-The planner works out of the box with no configuration needed. By default, `optimization_target` is set to `throughput`, which uses static thresholds on queue depth and KV cache utilization — no SLAs or profiling required:
+After you enable Planner in a DGDR, it works with no additional Planner tuning
+fields. By default, `optimization_target` is set to `throughput`, which uses
+static thresholds on queue depth and KV cache utilization — no SLAs or profiling
+required:
 
 ```yaml
-# Minimal planner config — uses throughput optimization by default
-features:
-  planner:
-    mode: disagg
-    backend: vllm
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: planner-throughput
+spec:
+  model: Qwen/Qwen3-0.6B
+  backend: vllm
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
+  # ...
+  features:
+    planner:
+      mode: disagg
+      backend: vllm
 ```
 
 For latency-sensitive workloads:
 
 ```yaml
-features:
-  planner:
-    mode: disagg
-    backend: vllm
-    optimization_target: latency
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: planner-latency
+spec:
+  model: Qwen/Qwen3-0.6B
+  backend: vllm
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
+  # ...
+  features:
+    planner:
+      mode: disagg
+      backend: vllm
+      optimization_target: latency
 ```
 
 ### SLA-Based Scaling (advanced)
@@ -102,14 +122,25 @@ features:
 For precise SLA targeting with native AIC estimates, optional bootstrap profiling data, or live FPM warmup, set `optimization_target: sla`:
 
 ```yaml
-features:
-  planner:
-    optimization_target: sla
-    enable_throughput_scaling: true
-    enable_load_scaling: true
-    ttft_ms: 500.0
-    itl_ms: 50.0
-    pre_deployment_sweeping_mode: rapid
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: planner-sla
+spec:
+  model: Qwen/Qwen3-0.6B
+  backend: vllm
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
+  # ...
+  features:
+    planner:
+      mode: disagg
+      backend: vllm
+      optimization_target: sla
+      enable_throughput_scaling: true
+      enable_load_scaling: true
+      ttft_ms: 500.0
+      itl_ms: 50.0
+      pre_deployment_sweeping_mode: rapid
 ```
 
 The fastest path to SLA-based scaling is through a DynamoGraphDeploymentRequest,

@@ -119,7 +119,8 @@ spec:
       advisory: true
 ```
 
-For the full PlannerConfig field reference and scaling mode details, see the
+For Planner behavior, scaling modes, and the full PlannerConfig field reference,
+see the [Planner overview](../components/planner/README.md) and
 [Planner Guide](../components/planner/planner-guide.md).
 
 `spec.overrides.dgd` is not required to enable Planner. Use
