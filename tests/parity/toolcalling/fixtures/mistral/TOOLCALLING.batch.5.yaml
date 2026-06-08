@@ -99,6 +99,8 @@ cases:
         calls: []
         normal_text: '[{"name": "get_weather", "arguments": {"location": "Boston"}}, {"name": "get_weather", "arguments":
           {"location": "New York'
+        reason: vLLM does not repair the mid-value-truncated multi-call JSON and leaves the raw post-marker body in content; Dynamo balances the truncated JSON and recovers both calls.
       sglang:
         calls: []
         normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
+        reason: SGLang MistralDetector returns calls=[] on the bare [TOOL_CALLS]...[/TOOL_CALLS] format Dynamo emits; it keeps the narration prefix and drops the truncated calls.

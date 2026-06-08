@@ -218,7 +218,17 @@ pub(crate) fn try_repair_truncated_json(s: &str) -> Option<String> {
 fn try_parse_normal_text(input: &str, start_token: &str) -> String {
     // If input contains start token, just take the part before it
     if let Some(idx) = input.find(start_token) {
-        return input[..idx].trim().to_string();
+        let prefix = &input[..idx];
+        // The mistral family ([TOOL_CALLS]) keeps the boundary space before the
+        // marker to match vLLM; every other JSON family trims it. Keyed on the
+        // family's distinctive start token rather than a config field so the
+        // exported `JsonParserConfig` gains no new public member (downstream
+        // struct-literal constructors stay source-compatible).
+        return if start_token == "[TOOL_CALLS]" {
+            prefix.to_string()
+        } else {
+            prefix.trim().to_string()
+        };
     }
 
     // No start token found, return empty string

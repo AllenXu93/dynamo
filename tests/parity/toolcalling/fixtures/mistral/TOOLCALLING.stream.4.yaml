@@ -49,14 +49,17 @@ cases:
       dynamo:
         calls: []
         normal_text: '[TOOL_CALLS][{"name": "get_weather", "arguments": {"loc'
+        reason: Dynamo's mistral parser leaves the unparseable [TOOL_CALLS] prefix in normal_text when the stream ends mid-arguments (impl-defined recovery, mirrors TOOLCALLING.batch.5.c).
       sglang:
         calls: []
         normal_text: ''
+        reason: SGLang emits no call and no content for a stream truncated mid-arguments; Dynamo retains the raw prefix.
       vllm:
         calls:
         - name: get_weather
           arguments: '{"loc'
         normal_text: ''
+        reason: vLLM emits a malformed partial call with the incomplete argument fragment as arguments; Dynamo drops the unterminated call and keeps the raw prefix.
   TOOLCALLING.stream.4.c:
     description: Stream reaches length after a valid inner tool-call body without the required outer wrapper, followed by
       repeated close markers
@@ -80,3 +83,4 @@ cases:
       sglang:
         calls: []
         normal_text: '[{"name": "get_weather", "arguments": {"location": "NYC"}}[/TOOL_CALLS[/TOOL_CALLS[/TOOL_CALLS'
+        reason: SGLang strips the trailing ] from each orphan [/TOOL_CALLS] close marker (leaving bracket fragments); Dynamo and vLLM keep the bare body and markers verbatim when the [TOOL_CALLS] opener is absent.
