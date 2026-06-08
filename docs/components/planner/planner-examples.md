@@ -6,7 +6,7 @@ title: Planner Examples
 
 Practical examples for deploying the Planner with throughput-based scaling. The DGDR workflow can use native AIC estimates, optional bootstrap profiling data, or live FPM warmup depending on the model/backend combination. For deployment concepts, see the [Planner Guide](planner-guide.md). For a quick overview, see the [Planner README](README.md).
 
-## Basic Examples
+## DGDR Examples
 
 ### Minimal DGDR with AIC (Fastest)
 
@@ -63,7 +63,7 @@ kubectl apply -f sla-online.yaml -n $NAMESPACE
 
 > **Note**: Starting with Dynamo 1.0.0 (DGDR API version v1beta1), DGDR fields use structured spec fields (e.g., `spec.workload`, `spec.sla`, `spec.hardware`) instead of the nested `profilingConfig.config` blob used in v1alpha1.
 
-## Kubernetes Examples
+## Additional DGDR Patterns
 
 ### MoE Models (SGLang)
 
