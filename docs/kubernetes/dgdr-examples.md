@@ -59,6 +59,31 @@ kubectl apply -f sla-online.yaml -n $NAMESPACE
 
 > **Note**: Starting with Dynamo 1.0.0 (DGDR API version v1beta1), DGDR fields use structured spec fields (e.g., `spec.workload`, `spec.sla`, `spec.hardware`) instead of the nested `profilingConfig.config` blob used in v1alpha1.
 
+### Planner-Enabled DGDR
+
+Set `spec.features.planner` to enable Planner generation in the final DGD. DGDR
+passes this object as PlannerConfig to the Planner service; see the
+[Planner Guide](../components/planner/planner-guide.md#plannerconfig-reference)
+for available fields.
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: qwen3-planner
+spec:
+  model: Qwen/Qwen3-0.6B
+  backend: vllm
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
+  features:
+    planner:
+      mode: disagg
+      backend: vllm
+```
+
+`spec.overrides.dgd` is not required to enable Planner; use it only when the
+generated DGD needs additional customization.
+
 ## Additional DGDR Patterns
 
 ### MoE Models (SGLang)
