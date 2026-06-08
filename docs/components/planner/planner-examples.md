@@ -21,6 +21,10 @@ spec:
   model: Qwen/Qwen3-32B
   backend: vllm
   image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
+  features:
+    planner:
+      mode: disagg
+      backend: vllm
 ```
 
 Deploy:
@@ -43,6 +47,12 @@ spec:
   model: meta-llama/Llama-3.3-70B-Instruct
   backend: vllm
   image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
+  searchStrategy: thorough
+  features:
+    planner:
+      mode: disagg
+      backend: vllm
+      pre_deployment_sweeping_mode: thorough
 ```
 
 Deploy:
@@ -68,6 +78,10 @@ spec:
   model: deepseek-ai/DeepSeek-R1
   backend: sglang
   image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
+  features:
+    planner:
+      mode: disagg
+      backend: sglang
 ```
 
 Deploy:
@@ -100,6 +114,10 @@ spec:
   model: deepseek-ai/DeepSeek-R1
   backend: sglang
   image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
+  features:
+    planner:
+      mode: disagg
+      backend: sglang
 ```
 
 The profiler uses the DGD config from the ConfigMap as a **base template**, then optimizes it based on your SLA targets. The controller automatically injects `spec.model` and `spec.backend` into the final configuration.
@@ -122,6 +140,11 @@ spec:
     gpuSku: h200_sxm
 
   searchStrategy: rapid
+
+  features:
+    planner:
+      mode: disagg
+      backend: vllm
 ```
 
 ### Simulation with Mocker
@@ -136,6 +159,10 @@ spec:
   model: <model-name>
   backend: trtllm  # Real backend for profiling
   features:
+    planner:
+      mode: disagg
+      backend: trtllm
+      pre_deployment_sweeping_mode: rapid
     mocker:
       enabled: true  # Deploy mocker instead of real backend
 
@@ -226,13 +253,14 @@ See `components/planner/test/test_virtual_connector.py` for a full working examp
 
 ### Planner Configuration Passthrough
 
-Pass planner-specific settings through the DGDR:
+Pass PlannerConfig settings through `spec.features.planner`:
 
 ```yaml
-features:
-  planner:
-    optimization_target: sla
-    min_endpoint: 2
+spec:
+  features:
+    planner:
+      optimization_target: sla
+      min_endpoint: 2
 ```
 
 ### Review Before Deploy (autoApply: false)

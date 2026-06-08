@@ -70,12 +70,62 @@ spec:
 | `modelCache.pvcName` | No | — | Name of a `ReadWriteMany` PVC containing cached model weights |
 | `modelCache.pvcModelPath` | No | — | Path to the model directory inside the PVC |
 | `modelCache.pvcMountPath` | No | `/opt/model-cache` | Mount path inside containers |
-| `features.planner` | No | disabled | Enable the SLA-aware Planner; the generated DGD includes Planner service/configuration |
+| `features.planner` | No | disabled | PlannerConfig passed to the Planner service; when present, the generated DGD includes Planner service/configuration |
 | `features.mocker` | No | disabled | Enable mocker mode for testing |
 | `overrides.profilingJob` | No | — | `batchv1.JobSpec` overrides for the profiling job (e.g., tolerations) |
 | `overrides.dgd` | No | — | Raw DGD override base applied to the generated deployment |
 
 For the complete CRD spec, see the [API Reference](api-reference.md).
+
+### Planner
+
+DGDR supports Planner through `spec.features.planner`. Set this field to a
+PlannerConfig object to have DGDR pass that configuration to the profiler and
+generate Planner support in the final DGD. DGDR passes this PlannerConfig
+through without field-level validation; the Planner service validates it when it
+starts.
+
+When Planner is enabled, the generated output may include a `Planner` service in
+the DGD plus supporting Planner configuration resources, such as a
+`planner-config-*` ConfigMap. Depending on profiling mode and Planner settings,
+DGDR may also generate profiling-data resources for Planner bootstrap data.
+
+Minimal Planner-enabled DGDR:
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeploymentRequest
+metadata:
+  name: qwen3-planner
+spec:
+  model: Qwen/Qwen3-0.6B
+  backend: vllm
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
+  features:
+    planner:
+      mode: disagg
+      backend: vllm
+```
+
+To evaluate Planner recommendations without applying scaling changes, enable
+advisory mode in the same `features.planner` object:
+
+```yaml
+spec:
+  features:
+    planner:
+      mode: disagg
+      backend: vllm
+      advisory: true
+```
+
+For the full PlannerConfig field reference and scaling mode details, see the
+[Planner Guide](../components/planner/planner-guide.md).
+
+`spec.overrides.dgd` is not required to enable Planner. Use
+`spec.features.planner` for Planner enablement and configuration. Use
+`spec.overrides.dgd` only when you need to customize the generated DGD after
+DGDR has assembled it.
 
 > [!NOTE]
 > DGDR does not currently expose a `features.kvRouter` field. To configure
