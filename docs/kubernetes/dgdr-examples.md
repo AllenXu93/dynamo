@@ -7,8 +7,8 @@ title: DGDR Examples
 Practical examples for deploying with `DynamoGraphDeploymentRequest` (DGDR).
 The DGDR workflow can use native AIC estimates, optional bootstrap profiling
 data, or live FPM warmup depending on the model/backend combination. For DGDR
-concepts, see the [DGDR Reference](dgdr.md). For Planner concepts, see the
-[Planner Guide](../components/planner/planner-guide.md).
+concepts, see the [DGDR Reference](dgdr.md). For profiling concepts, see the
+[Profiler Guide](../components/profiler/profiler-guide.md).
 
 ## DGDR Examples
 
@@ -26,10 +26,6 @@ spec:
   model: Qwen/Qwen3-32B
   backend: vllm
   image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
-  features:
-    planner:
-      mode: disagg
-      backend: vllm
 ```
 
 Deploy:
@@ -53,11 +49,6 @@ spec:
   backend: vllm
   image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
   searchStrategy: thorough
-  features:
-    planner:
-      mode: disagg
-      backend: vllm
-      pre_deployment_sweeping_mode: thorough
 ```
 
 Deploy:
@@ -83,10 +74,6 @@ spec:
   model: deepseek-ai/DeepSeek-R1
   backend: sglang
   image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
-  features:
-    planner:
-      mode: disagg
-      backend: sglang
 ```
 
 Deploy:
@@ -119,10 +106,6 @@ spec:
   model: deepseek-ai/DeepSeek-R1
   backend: sglang
   image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
-  features:
-    planner:
-      mode: disagg
-      backend: sglang
 ```
 
 The profiler uses the DGD config from the ConfigMap as a **base template**, then optimizes it based on your SLA targets. The controller automatically injects `spec.model` and `spec.backend` into the final configuration.
@@ -145,18 +128,13 @@ spec:
     gpuSku: h200_sxm
 
   searchStrategy: rapid
-
-  features:
-    planner:
-      mode: disagg
-      backend: vllm
 ```
 
 ### Simulation with Mocker
 
 Deploy a mocker backend that simulates GPU timing behavior without real GPUs. Useful for:
 - Large-scale experiments without GPU resources
-- Testing planner behavior and infrastructure
+- Testing profiling behavior and infrastructure
 - Validating deployment configurations
 
 ```yaml
@@ -164,10 +142,6 @@ spec:
   model: <model-name>
   backend: trtllm  # Real backend for profiling
   features:
-    planner:
-      mode: disagg
-      backend: trtllm
-      pre_deployment_sweeping_mode: rapid
     mocker:
       enabled: true  # Deploy mocker instead of real backend
 
@@ -239,8 +213,4 @@ kubectl delete pod pvc-access-pod -n $NAMESPACE
 ## Related Documentation
 
 - [DGDR Reference](dgdr.md) -- DGDR field reference and lifecycle
-- [Planner overview](../components/planner/README.md) -- Overview and quick start
-- [Planner Guide](../components/planner/planner-guide.md) -- Deployment, configuration, integration
-- [Planner Examples](../components/planner/planner-examples.md) -- Planner-specific configuration examples
-- [Planner Design](../design-docs/planner-design.md) -- Architecture deep-dive
 - [Profiler Guide](../components/profiler/profiler-guide.md) -- Profiling workflow
