@@ -82,20 +82,10 @@ Deploy:
 kubectl apply -f sla-moe.yaml -n $NAMESPACE
 ```
 
-### Using Existing DGD Configs (Custom Setups)
+### Customizing the Generated DGD
 
-Reference an existing DynamoGraphDeployment config via ConfigMap:
-
-**Step 1: Create ConfigMap from your DGD config:**
-
-```bash
-kubectl create configmap deepseek-r1-config \
-  --from-file=disagg.yaml=/path/to/your/disagg.yaml \
-  --namespace $NAMESPACE \
-  --dry-run=client -o yaml | kubectl apply -f -
-```
-
-**Step 2: Reference it in your DGDR:**
+Use `spec.overrides.dgd` to provide a partial `DynamoGraphDeployment` that is
+merged into the profiler-generated deployment:
 
 ```yaml
 apiVersion: nvidia.com/v1beta1
@@ -106,9 +96,19 @@ spec:
   model: deepseek-ai/DeepSeek-R1
   backend: sglang
   image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"  # dynamo-frontend for Dynamo < 1.1.0
+  overrides:
+    dgd:
+      apiVersion: nvidia.com/v1alpha1
+      kind: DynamoGraphDeployment
+      spec:
+        envs:
+          - name: CUSTOM_WORKER_ENV
+            value: "enabled"
 ```
 
-The profiler uses the DGD config from the ConfigMap as a **base template**, then optimizes it based on your SLA targets. The controller automatically injects `spec.model` and `spec.backend` into the final configuration.
+DGDR merges the override into the generated DGD after profiling selects a
+configuration. The controller automatically injects `spec.model` and
+`spec.backend` into the final configuration.
 
 ### Inline Configuration (Simple Use Cases)
 
