@@ -58,7 +58,28 @@ pub fn get_tool_parser_map() -> &'static HashMap<&'static str, ToolCallConfig> {
         map.insert("gemma-4", ToolCallConfig::gemma4());
         map.insert("default", ToolCallConfig::default());
         map.insert("nemotron_nano", ToolCallConfig::qwen3_coder()); // nemotron nano follows qwen3_coder format
-        map.insert("qwen25", ToolCallConfig::hermes()); // qwen2.5 uses the same <tool_call>...</tool_call> format as hermes
+        // qwen2.5 uses the same <tool_call>...</tool_call> format as hermes, but
+        // unlike hermes it has no upstream vLLM parser (and SGLang does not parse
+        // this family's wrapper). With no vLLM peer to align to, qwen25 keeps the
+        // default trim behavior rather than hermes's vLLM-matching verbatim
+        // whitespace; preserving the space would change qwen25's sole-oracle
+        // output for no parity benefit.
+        let mut qwen25 = ToolCallConfig::hermes();
+        if let ParserConfig::Json(ref mut c) = qwen25.parser_config {
+            // qwen25 is sole-oracle (no vLLM/SGLang peer); it must not inherit
+            // hermes's vendor-alignment behaviors. Reset them to the
+            // conservative defaults so qwen25's established output is unchanged.
+            c.preserve_normal_text_whitespace = false;
+            c.repair_truncated_body = true;
+            c.drop_unusable_json_wrapper = false;
+            c.drop_partial_markup_on_stream_finalize = false;
+            c.recover_trailing_unclosed_call = false;
+            // NOT reset: `recover_unclosed_single_call` is intentionally left at
+            // hermes's `false`, so qwen2.5 also drops an unfinished single call
+            // (it shares hermes's per-wrapper extraction model and has no
+            // vLLM/SGLang peer to align recovery to).
+        }
+        map.insert("qwen25", qwen25);
         map
     })
 }
@@ -182,11 +203,70 @@ async fn detect_and_parse_tool_call_with_recovery_options(
         // Other parsers don't have an EOF-recovery flag — pass through.
         other => other.clone(),
     };
+    // Stream-finalize partial-markup suppression (TOOLCALLING.stream.4.b).
+    // Computed before `recovery_config` is moved into `cfg`. When the model
+    // opened a tool call that never terminated and nothing is recovered, drop
+    // the dangling wrapper markup but PRESERVE any prose that preceded the
+    // opener. Only fires when:
+    //   * this is the stream-finalize path (`recover_dsml_eof`), so the batch
+    //     path keeps its documented leak behavior;
+    //   * the JSON family opted in (`drop_partial_markup_on_stream_finalize`);
+    //   * at least one opener has NO end token after it — i.e. a genuinely
+    //     UNCLOSED wrapper exists. Suppression preserves everything up to that
+    //     unclosed opener and drops the dangling buffer from there.
+    // Selecting the FIRST unclosed opener (not merely the earliest opener)
+    // matters: a closed-but-unusable `<tool_call>...</tool_call>` before a
+    // later unterminated `<tool_call>{...` must not mask the unterminated one
+    // (which would otherwise leak the whole dangling buffer). The preserved
+    // prefix may still contain an earlier closed wrapper, which is consistent
+    // with hermes's documented leak of a standalone closed-but-unusable
+    // wrapper. The value is the preserved prefix (Some) when suppression
+    // applies.
+    let partial_markup_prefix: Option<String> = if recover_dsml_eof
+        && let ParserConfig::Json(c) = &recovery_config
+        && c.drop_partial_markup_on_stream_finalize
+    {
+        // All opener occurrences (every start token, every position), in order.
+        let mut openers: Vec<(usize, usize)> = Vec::new();
+        for t in c.tool_call_start_tokens.iter().filter(|t| !t.is_empty()) {
+            for (pos, _) in message.match_indices(t.as_str()) {
+                openers.push((pos, t.len()));
+            }
+        }
+        openers.sort_by_key(|&(pos, _)| pos);
+        // First opener whose remainder contains no configured end token.
+        let unterminated = openers.into_iter().find_map(|(pos, tok_len)| {
+            let after_opener = &message[pos + tok_len..];
+            let has_end = c
+                .tool_call_end_tokens
+                .iter()
+                .any(|e| !e.is_empty() && after_opener.contains(e.as_str()));
+            if has_end { None } else { Some(pos) }
+        });
+        unterminated.map(|pos| {
+            // Preserve everything before the unclosed opener, honoring the
+            // family's whitespace policy (verbatim for hermes, else trimmed).
+            let pre = &message[..pos];
+            if c.preserve_normal_text_whitespace {
+                pre.to_string()
+            } else {
+                pre.trim().to_string()
+            }
+        })
+    } else {
+        None
+    };
     let cfg = ToolCallConfig {
         parser_config: recovery_config,
         structural_tag_builder: None,
     };
-    try_tool_call_parse(message, &cfg, tools).await
+    let (calls, content) = try_tool_call_parse(message, &cfg, tools).await?;
+    if let Some(prefix) = partial_markup_prefix
+        && calls.is_empty()
+    {
+        return Ok((vec![], Some(prefix)));
+    }
+    Ok((calls, content))
 }
 
 // Base Detector to call for all tool parsing
@@ -584,7 +664,8 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
         let (result, content) = detect_and_parse_tool_call(input, Some("hermes"), None)
             .await
             .unwrap();
-        assert_eq!(content, Some("Hey How are you?".to_string()));
+        // hermes preserves the narration verbatim (trailing space) to match vLLM.
+        assert_eq!(content, Some("Hey How are you? ".to_string()));
         assert!(!result.is_empty());
         assert_eq!(result.len(), 1);
     }
@@ -734,7 +815,8 @@ Okay, the user is asking for the weather in San Francisco in Fahrenheit. Let me 
 "#;
         let config = ToolCallConfig::hermes();
         let (result, content) = try_tool_call_parse(input, &config, None).await.unwrap();
-        assert_eq!(content, Some("Hey How are you?".to_string()));
+        // hermes preserves the narration verbatim (trailing space) to match vLLM.
+        assert_eq!(content, Some("Hey How are you? ".to_string()));
         assert!(!result.is_empty());
         assert_eq!(result.len(), 2);
         let (name, args) = extract_name_and_args(result[0].clone());
@@ -1947,6 +2029,45 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
         let args: serde_json::Value =
             serde_json::from_str(&tool_calls[0].function.arguments).unwrap();
         assert_eq!(args["timezone"], "Asia/Shanghai");
+    }
+
+    /// Stream-finalize partial-markup suppression must select the FIRST
+    /// UNCLOSED opener, not merely the earliest opener. Here a closed-but-
+    /// unusable `<tool_call>{...}</tool_call>` (no name key -> not a call)
+    /// precedes a later unterminated `<tool_call>{...`. The earliest opener
+    /// looks "closed" (an end token follows it), so the previous logic skipped
+    /// suppression and leaked the entire dangling buffer. The fix must drop the
+    /// trailing unterminated buffer (its `"name": "later_call"` body must not
+    /// reach normal_text), while no call is recovered.
+    #[tokio::test]
+    async fn test_hermes_stream_finalize_multi_opener_drops_dangling_buffer() {
+        // First wrapper is closed but unusable (no "name"); second is unterminated.
+        let input = concat!(
+            "<tool_call>{\"arguments\": {\"x\": 1}}</tool_call>",
+            "<tool_call>{\"name\": \"later_call\", \"arguments\": {\"loc"
+        );
+
+        let (tool_calls, normal_text) = detect_and_parse_tool_call_with_stream_finalize_recovery(
+            input,
+            Some("hermes"),
+            None,
+        )
+        .await
+        .expect("Failed to parse");
+
+        assert!(
+            tool_calls.is_empty(),
+            "no call should be recovered (first unusable, second unterminated), got {tool_calls:?}"
+        );
+        let text = normal_text.unwrap_or_default();
+        assert!(
+            !text.contains("later_call"),
+            "dangling unterminated buffer must be dropped, not leaked: {text:?}"
+        );
+        assert!(
+            !text.contains("{\"loc"),
+            "partial argument fragment must not leak: {text:?}"
+        );
     }
 
     /// Alias registration: verifies `deepseek-v4` and `deepseekv4` route to the same parser as `deepseek_v4`. Not a TOOLCALLING.*; covers registry plumbing.

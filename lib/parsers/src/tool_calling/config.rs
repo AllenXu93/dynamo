@@ -64,6 +64,75 @@ pub struct JsonParserConfig {
     /// trailing marker as leaked text on the next chunk.
     #[serde(default)]
     pub strip_markup_on_recovery: bool,
+
+    /// Preserve the verbatim whitespace of the narration that precedes a tool
+    /// call instead of trimming it. The default JSON path trims both ends of
+    /// the pre-marker text (`"I will check. "` → `"I will check."`). Upstream
+    /// vLLM keeps that text as emitted, so families aligned to vLLM set this
+    /// `true` to match byte-for-byte. SGLang trims, so a `true` family records
+    /// SGLang as the documented outlier. Mirrors the XML-family contract
+    /// (glm47 / kimi_k2): when a call is found, normal_text is passed through
+    /// as-is rather than trimmed. Default `false` keeps every other JSON
+    /// family's existing trim behavior unchanged.
+    #[serde(default)]
+    pub preserve_normal_text_whitespace: bool,
+
+    /// Whether to brace-balance a truncated JSON body and retry the parse on
+    /// the finalize path (`try_repair_truncated_json`). Repairing a malformed
+    /// body recovers calls that upstream vLLM/SGLang drop. Families with live
+    /// vLLM/SGLang peers that drop malformed bodies (e.g. hermes) set this
+    /// `false` to match: a complete body with only a missing end-token still
+    /// recovers (that path needs no repair), but a genuinely malformed body is
+    /// dropped, not repaired. Default `true` preserves the aggressive recovery
+    /// used by peerless agent targets like nemotron_deci.
+    #[serde(default = "default_true")]
+    pub repair_truncated_body: bool,
+
+    /// Drop a fully-framed `<start>...<end>` wrapper whose inner body is
+    /// COMPLETE valid JSON but not a usable tool call (missing the name or the
+    /// arguments/parameters key), emitting empty normal_text instead of leaking
+    /// the wrapper. Targets TOOLCALLING.batch.4.c / 6.c, matching the
+    /// cross-family majority (kimi/glm/nemotron/deepseek). Deliberately narrow:
+    /// a non-JSON body (4.a) or a truncated/incomplete body (5.c) is not a
+    /// complete JSON object, so it falls through to the existing impl-defined
+    /// leak (documented all-engine-agree divergences). Default `false` leaves
+    /// other families unchanged.
+    #[serde(default)]
+    pub drop_unusable_json_wrapper: bool,
+
+    /// On the STREAM-finalize path only: when the model opened a tool call
+    /// (`<start>...`) but the stream ended before it completed and no call was
+    /// recovered, drop the partial wrapper markup instead of leaking it into
+    /// normal_text. Targets TOOLCALLING.stream.4.b, matching the cross-family
+    /// majority (nemotron/kimi/deepseek) which hide an unterminated jailed
+    /// buffer. Scoped to stream finalization, so the batch analog
+    /// (TOOLCALLING.batch.5.c, a documented all-engine-agree leak) is
+    /// unaffected. Default `false`.
+    #[serde(default)]
+    pub drop_partial_markup_on_stream_finalize: bool,
+
+    /// Recover a final `<start>{...}` tool call whose end marker is missing but
+    /// whose JSON body is complete, when it follows one or more closed calls
+    /// (TOOLCALLING.batch.5.d). Matches vLLM/SGLang. A trailing call with a
+    /// truncated body is not recovered. Default `false` so families without a
+    /// vLLM/SGLang peer to align to (e.g. qwen2.5) keep their prior output.
+    #[serde(default)]
+    pub recover_trailing_unclosed_call: bool,
+
+    /// Recover a single tool call whose body is complete but whose closing
+    /// end-token never arrived (e.g. `<tool_call>{...complete...}` with no
+    /// `</tool_call>`), via EOF recovery on the finalize path. Default `true`
+    /// preserves the universal truncation recovery used by nemotron / llama3 /
+    /// mistral / phi4 / jamba (and matched by vLLM/SGLang). Families that
+    /// intentionally DROP an unfinished single call set this `false` (hermes):
+    /// the call is not recovered and the raw text is left as-is, which is NOT
+    /// parity with vLLM/SGLang — it is a deliberate hermes behavior.
+    #[serde(default = "default_true")]
+    pub recover_unclosed_single_call: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for JsonParserConfig {
@@ -78,6 +147,12 @@ impl Default for JsonParserConfig {
             bare_json_mode: false,
             allow_eof_recovery: false,
             strip_markup_on_recovery: false,
+            preserve_normal_text_whitespace: false,
+            repair_truncated_body: true,
+            drop_unusable_json_wrapper: false,
+            drop_partial_markup_on_stream_finalize: false,
+            recover_trailing_unclosed_call: false,
+            recover_unclosed_single_call: true,
         }
     }
 }
@@ -387,6 +462,35 @@ impl ToolCallConfig {
             parser_config: ParserConfig::Json(JsonParserConfig {
                 tool_call_start_tokens: vec!["<tool_call>".to_string()],
                 tool_call_end_tokens: vec!["</tool_call>".to_string()],
+                // Hermes aligns to vLLM, which keeps the narration before a
+                // tool call verbatim (trailing space included). SGLang trims;
+                // it is the documented outlier for this family.
+                preserve_normal_text_whitespace: true,
+                // Hermes has live vLLM/SGLang peers that drop a malformed JSON
+                // body rather than brace-repairing it. Match them: do not
+                // repair, and drop a fully-framed wrapper whose body is valid
+                // JSON but not a usable tool call (missing name/args).
+                repair_truncated_body: false,
+                drop_unusable_json_wrapper: true,
+                // On stream finalize, an unterminated <tool_call> buffer is
+                // dropped rather than leaked, matching nemotron/kimi/deepseek.
+                drop_partial_markup_on_stream_finalize: true,
+                // A final `<tool_call>{...}` whose closing tag never arrived is
+                // DROPPED (not recovered), even when its body is complete. This
+                // matches the cross-family majority for hermes's per-wrapper
+                // extraction model (kimi_k2 / glm47 / deepseek_v3_1 / qwen25 all
+                // drop the trailing unclosed call). The trailing markup is not
+                // leaked into normal_text either. `false` is also the default,
+                // so the other JSON families that share this parser are
+                // unaffected; qwen2.5 resets it separately.
+                recover_trailing_unclosed_call: false,
+                // A single tool call whose body is complete but whose closing
+                // </tool_call> never arrived is DROPPED, not recovered (the raw
+                // text is left as-is). This is a deliberate hermes behavior, NOT
+                // parity: vLLM and SGLang both recover such a call. Default is
+                // `true`, so the other JSON families (nemotron / llama3 /
+                // mistral / phi4 / jamba) keep their universal recovery.
+                recover_unclosed_single_call: false,
                 ..Default::default()
             }),
             structural_tag_builder: Some(StructuralTagBuilder::TriggeredTags(

@@ -20,15 +20,11 @@ cases:
           location:
             type: string
     expected:
-      dynamo:
-        calls:
-        - name: get_weather
-          arguments:
-            location: NYC
-        normal_text: ''
-      sglang:
+      dynamo: &id001s
+        reason: qwen2.5 inherits hermes's drop of an unfinished single call (no closing </tool_call>); it does not enable the stream-finalize partial-markup suppression, so the raw buffer is left as content. qwen2.5 has no vLLM peer and SGLang likewise treats it as content, so Dynamo and SGLang agree here.
         calls: []
         normal_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}'
+      sglang: *id001s
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
   TOOLCALLING.stream.4.b:

@@ -63,17 +63,13 @@ cases:
     tools:
     - *id002
     expected:
-      dynamo:
-        calls:
-        - name: get_weather
-          arguments:
-            location: NYC
-        normal_text: ''
-      vllm:
-        unavailable: vLLM has no parser for family='qwen25'
-      sglang:
+      dynamo: &id004
+        reason: qwen2.5 inherits hermes's drop of an unfinished single call (no closing </tool_call>); the raw text is left as content. qwen2.5 has no vLLM peer and SGLang likewise treats it as content, so Dynamo and SGLang agree here.
         calls: []
         normal_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}'
+      vllm:
+        unavailable: vLLM has no parser for family='qwen25'
+      sglang: *id004
   TOOLCALLING.batch.4.e:
     description: Malformed-prefix recovery — n/a for this family's syntax
     reason: |-

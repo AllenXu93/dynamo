@@ -17,13 +17,16 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &id001
+      dynamo:
+        reason: Hermes intentionally DROPS a single tool call whose closing </tool_call> never arrived, leaving the raw text in normal_text. This is NOT parity - vLLM and SGLang both recover the call - it is a deliberate hermes behavior (no recovery of an unfinished single call).
+        calls: []
+        normal_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}'
+      vllm: &id001
         calls:
         - name: get_weather
           arguments:
             location: NYC
         normal_text: ''
-      vllm: *id001
       sglang: *id001
   TOOLCALLING.batch.5.b:
     description: Closing </tool_call> without matching <tool_call> open
@@ -65,7 +68,8 @@ cases:
           arguments:
             location: Boston
         normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
-      vllm:
+      vllm: &id006
+        reason: vLLM recovers the final tool call even though its closing </tool_call> never arrived. Dynamo drops the unterminated trailing call (keeping the complete leading call, no leak), matching the cross-family majority for the per-wrapper extraction model (kimi_k2 / glm47 / deepseek_v3_1 / qwen25).
         calls:
         - name: get_weather
           arguments:
@@ -74,15 +78,7 @@ cases:
           arguments:
             location: New York
         normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
-      sglang:
-        calls:
-        - name: get_weather
-          arguments:
-            location: Boston
-        - name: get_weather
-          arguments:
-            location: New York
-        normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
+      sglang: *id006
   TOOLCALLING.batch.5.e:
     description: Multi-call, last call truncated mid-arg-value
     ref: dynamo
@@ -98,11 +94,13 @@ cases:
             location: Boston
         normal_text: I'll start by fetching the weather for both Boston and New York at the same time!
       vllm:
+        reason: vLLM discards the entire input when the final tool call is truncated mid-argument, dropping the complete leading call and leaking the raw <tool_call> wrapper into normal_text. Dynamo keeps the complete leading call and drops only the truncated trailing call (no repair, no leak).
         calls: []
         normal_text: 'I''ll start by fetching the weather for both Boston and New York at the same time!<tool_call>{"name":
           "get_weather", "arguments": {"location": "Boston"}}</tool_call><tool_call>{"name": "get_weather", "arguments": {"location":
           "New York'
       sglang:
+        reason: SGLang discards the entire input when the final tool call is truncated mid-argument, dropping the complete leading call and leaking the raw <tool_call> wrapper into normal_text. Dynamo keeps the complete leading call and drops only the truncated trailing call (no repair, no leak).
         calls: []
         normal_text: 'I''ll start by fetching the weather for both Boston and New York at the same time!<tool_call>{"name":
           "get_weather", "arguments": {"location": "Boston"}}</tool_call><tool_call>{"name": "get_weather", "arguments": {"location":
