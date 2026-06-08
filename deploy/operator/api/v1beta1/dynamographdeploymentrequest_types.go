@@ -335,7 +335,8 @@ type KVRouterSpec struct {
 type FeaturesSpec struct {
 	// Planner is the raw SLA planner configuration passed to the planner service.
 	// Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig.
-	// Go treats this as opaque bytes; the Planner service validates it at startup.
+	// DGDR passes this object through without field-level validation; the Planner
+	// service validates it at startup.
 	// The presence of this field (non-null) enables the planner in the generated DGD.
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
