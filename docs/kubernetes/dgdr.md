@@ -122,6 +122,8 @@ spec:
 For Planner behavior, scaling modes, and the full PlannerConfig field reference,
 see the [Planner overview](../components/planner/README.md) and
 [Planner Guide](../components/planner/planner-guide.md).
+For additional generated-deployment examples, see
+[DGDR Examples](dgdr-examples.md).
 
 `spec.overrides.dgd` is not required to enable Planner. Use
 `spec.features.planner` for Planner enablement and configuration. Use

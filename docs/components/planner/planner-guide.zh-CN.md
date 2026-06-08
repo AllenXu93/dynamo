@@ -192,6 +192,6 @@ planner 通过 `--config /path/to/planner_config.json` 接收其配置，该文�
 
 - [Planner overview](README.md) — 为什么 LLM 推理需要不同的 autoscaler
 - [Planner Design](../../design-docs/planner-design.md) — 架构和算法内部机制
-- [Planner Examples](planner-examples.md) — DGDR YAML 示例、样例配置、高级模式
+- [DGDR Examples](../../kubernetes/dgdr-examples.md) — DGDR YAML 示例、样例配置、高级模式
 - [Global Planner Guide](global-planner.md) — 多 DGD 协调、共享 GPU 预算、单端点多 pool 部署
 - [Profiler Guide](../profiler/profiler-guide.md) — profiling 数据的生成方式
