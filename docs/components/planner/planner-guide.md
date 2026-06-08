@@ -30,22 +30,10 @@ The planner supports four optimization targets that determine how scaling decisi
 
 ## PlannerConfig Reference
 
-The planner is configured via a `PlannerConfig` JSON/YAML object. In a DGDR,
-place this configuration under `spec.features.planner`. The snippets in this
-section show DGDR manifests with unrelated fields abbreviated with `# ...`
-comments; the raw Planner service config omits the DGDR envelope and the
-`features.planner` wrapper.
+The planner is configured via a `PlannerConfig` JSON/YAML object. When using the profiler, this is placed under the `features.planner` section of the DGDR spec:
 
 ```yaml
-apiVersion: nvidia.com/v1beta1
-kind: DynamoGraphDeploymentRequest
-metadata:
-  name: planner-throughput
 spec:
-  model: Qwen/Qwen3-0.6B
-  backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
-  # ...
   features:
     planner:
       mode: disagg
@@ -56,41 +44,23 @@ spec:
 For SLA-based scaling:
 
 ```yaml
-apiVersion: nvidia.com/v1beta1
-kind: DynamoGraphDeploymentRequest
-metadata:
-  name: planner-sla
 spec:
-  model: Qwen/Qwen3-0.6B
-  backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
-  # ...
   features:
     planner:
-      mode: disagg
-      backend: vllm
       optimization_target: sla
       enable_throughput_scaling: true
       enable_load_scaling: false
       pre_deployment_sweeping_mode: rapid
+      mode: disagg
+      backend: vllm
 ```
 
 To evaluate Planner behavior without changing replica counts, turn on advisory mode:
 
 ```yaml
-apiVersion: nvidia.com/v1beta1
-kind: DynamoGraphDeploymentRequest
-metadata:
-  name: planner-advisory
 spec:
-  model: Qwen/Qwen3-0.6B
-  backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.1.1"
-  # ...
   features:
     planner:
-      mode: disagg
-      backend: vllm
       advisory: true
 ```
 
