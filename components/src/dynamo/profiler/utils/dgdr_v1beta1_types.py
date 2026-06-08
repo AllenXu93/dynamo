@@ -205,7 +205,7 @@ class FeaturesSpec(BaseModel):
 
     planner: Optional[PlannerConfig] = Field(
         default=None,
-        description="Planner is the raw SLA planner configuration passed to the planner service. Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig. See the [PlannerConfig reference](../components/planner/planner-guide.md#plannerconfig-reference). DGDR passes this object through without field-level validation; the Planner service validates it at startup. The presence of this field (non-null) enables the planner in the generated DGD.",
+        description="Planner is the raw SLA planner configuration passed to the planner service. Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig. See https://docs.dynamo.nvidia.com/dynamo/components/planner/planner-guide#plannerconfig-reference. DGDR passes this object through without field-level validation; the Planner service validates it at startup. The presence of this field (non-null) enables the planner in the generated DGD.",
     )
     mocker: Optional[MockerSpec] = Field(
         default=None,
