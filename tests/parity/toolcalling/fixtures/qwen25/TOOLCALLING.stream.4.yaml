@@ -20,17 +20,12 @@ cases:
           location:
             type: string
     expected:
-      dynamo:
-        calls:
-        - name: get_weather
-          arguments:
-            location: NYC
-        normal_text: ''
-      sglang:
-        calls: []
-        normal_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}'
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
+      dynamo: &id001
+        calls: []
+        normal_text: '<tool_call>{"name": "get_weather", "arguments": {"location": "NYC"}}'
+      sglang: *id001
   TOOLCALLING.stream.4.b:
     description: Stream terminates mid-call body before the in-flight argument payload is complete
     ref: derived from TOOLCALLING.batch.5.c
@@ -47,10 +42,10 @@ cases:
           location:
             type: string
     expected:
-      dynamo: &id001
+      dynamo: &id002
         calls: []
         normal_text: '<tool_call>{"name": "get_weather", "arguments": {"loc'
-      sglang: *id001
+      sglang: *id002
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
   TOOLCALLING.stream.4.c:
@@ -75,5 +70,8 @@ cases:
       vllm:
         unavailable: vLLM has no parser for family='qwen25'
       sglang:
+        reason: SGLang's qwen25 streaming detector strips dangling </tool_call> close markers from normal_text when no opening
+          <tool_call> marker preceded them; Dynamo's qwen25 (hermes alias) parser leaves them in place (impl-defined recovery,
+          mirroring TOOLCALLING.batch.5.b).
         calls: []
         normal_text: '{"name": "get_weather", "arguments": {"location": "NYC"}}'

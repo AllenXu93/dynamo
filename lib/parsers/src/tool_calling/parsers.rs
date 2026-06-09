@@ -58,7 +58,7 @@ pub fn get_tool_parser_map() -> &'static HashMap<&'static str, ToolCallConfig> {
         map.insert("gemma-4", ToolCallConfig::gemma4());
         map.insert("default", ToolCallConfig::default());
         map.insert("nemotron_nano", ToolCallConfig::qwen3_coder()); // nemotron nano follows qwen3_coder format
-        map.insert("qwen25", ToolCallConfig::hermes()); // qwen2.5 uses the same <tool_call>...</tool_call> format as hermes
+        map.insert("qwen25", ToolCallConfig::hermes()); // qwen2.5 uses the same <tool_call>...</tool_call> format as hermes; EOF-recovery opt-out is keyed by name in detect_and_parse_tool_call_with_recovery_options
         map
     })
 }
@@ -164,7 +164,11 @@ async fn detect_and_parse_tool_call_with_recovery_options(
     let recovery_config = match &base.parser_config {
         ParserConfig::Json(c) => {
             let mut c = c.clone();
-            c.allow_eof_recovery = true;
+            // qwen25 opts out: drop unterminated calls to match SGLang, rather
+            // than salvaging them like hermes and the other JSON families.
+            // Keyed on the parser name (not a config field) so the exported
+            // JsonParserConfig struct stays unchanged for downstream callers.
+            c.allow_eof_recovery = parser_key != "qwen25";
             ParserConfig::Json(c)
         }
         ParserConfig::Xml(c) => {
