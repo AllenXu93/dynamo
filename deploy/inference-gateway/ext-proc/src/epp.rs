@@ -14,11 +14,11 @@ use std::time::Duration;
 
 use anyhow::Result;
 use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
-use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
+use dynamo_kv_router::protocols::WorkerWithDpRank;
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
-use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
 use dynamo_llm::kv_router::routing::{
-    LoadPlaceholderTokenizer, PreprocessorTokenizer, RequestTokenizer, extract_hints,
+    LoadPlaceholderTokenizer, PreprocessorTokenizer, RequestTokenizer, RoutingDecision,
+    RoutingService,
 };
 use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
@@ -92,11 +92,11 @@ pub struct Router {
     /// `None` in external (vanilla-vLLM) mode: the worker tokenizes and the EPP
     /// routes load-aware without replicating the worker's tokenizer config.
     preprocessor: Option<Arc<OpenAIPreprocessor>>,
-    /// Tokenizer that produces routing token IDs — a shared abstraction
-    /// (`dynamo_llm::kv_router::routing`): in-process preprocessor (dynamo
-    /// mode), a sidecar over a bounded-timeout HTTP client (external precise),
-    /// or a load-aware placeholder. The standalone router uses the same trait.
-    tokenizer: Arc<dyn RequestTokenizer>,
+    /// Shared routing pipeline (tokenize → hints → prefill/decode select) from
+    /// `dynamo_llm::kv_router::routing`, so the EPP and the standalone router
+    /// share one routing decision. Load bookkeeping and ext_proc header emission
+    /// stay in this adapter.
+    routing_service: RoutingService,
     runtime: Runtime,
     /// Port to route to on each pod, from the InferencePool's `targetPorts`
     /// (or `DYN_EPP_TARGET_PORT`). `None` falls back to the container port named
@@ -344,11 +344,16 @@ impl Router {
             Arc::new(LoadPlaceholderTokenizer)
         };
 
+        // Shared routing pipeline. Holds its own router handles (Arc clones);
+        // the adapter keeps `decode_router`/`prefill_router` for load booking.
+        let routing_service =
+            RoutingService::new(tokenizer, decode_router.clone(), prefill_router.clone());
+
         Ok(Self {
             prefill_router,
             decode_router,
             preprocessor,
-            tokenizer,
+            routing_service,
             runtime,
             target_port,
             tokenize_url,
@@ -497,98 +502,6 @@ impl Router {
             }
         }
         (prefill, decode)
-    }
-
-    /// Route a prefill request. Returns (worker_id, dp_rank).
-    ///
-    /// `priority_jump` is forwarded to the prefill scheduler queue so that
-    /// requests carrying `nvext.agent_hints.priority` jump ahead of normal
-    /// arrivals when the router queue is active.
-    pub async fn route_prefill(
-        &self,
-        tokens: &[u32],
-        priority_jump: f64,
-        allowed_worker_ids: Option<HashSet<u64>>,
-    ) -> Result<(u64, Option<u32>)> {
-        if let Some(ref ids) = allowed_worker_ids {
-            self.prefill_router.register_workers(ids);
-        }
-
-        let outcome = self
-            .prefill_router
-            .query_prefill_worker(
-                tokens,
-                None,
-                false,
-                None,
-                priority_jump,
-                allowed_worker_ids,
-                RoutingConstraints::default(),
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("Prefill query failed: {:?}", e))?;
-
-        match outcome {
-            PrefillQueryOutcome::Routed { worker_id, dp_rank } => Ok((worker_id, dp_rank)),
-            // Surface backpressure as an error so the caller's
-            // enforce_disagg / aggregated-fallback logic in `pick()` can
-            // decide whether to fail the request or fall back to decode-only.
-            PrefillQueryOutcome::Backpressure {
-                reason,
-                queued_isl_tokens,
-                max_queued_isl_tokens,
-            } => Err(anyhow::anyhow!(
-                "Prefill router backpressure: {:?} (queued_isl_tokens={}, max={:?})",
-                reason,
-                queued_isl_tokens,
-                max_queued_isl_tokens
-            )),
-        }
-    }
-
-    /// Route a decode request. Returns (WorkerWithDpRank, overlap_blocks).
-    ///
-    /// `priority_jump` is forwarded to the decode scheduler queue so that
-    /// requests carrying `nvext.agent_hints.priority` jump ahead of normal
-    /// arrivals when the router queue is active.
-    pub async fn route_decode(
-        &self,
-        tokens: &[u32],
-        is_disaggregated: bool,
-        priority_jump: f64,
-        expected_output_tokens: Option<u32>,
-        allowed_worker_ids: Option<HashSet<u64>>,
-    ) -> Result<(WorkerWithDpRank, u32)> {
-        if let Some(ref ids) = allowed_worker_ids {
-            self.decode_router.register_workers(ids);
-        }
-
-        let config_override = if is_disaggregated {
-            Some(RouterConfigOverride {
-                overlap_score_credit: Some(0.0),
-                assume_kv_reuse: Some(false),
-                track_prefill_tokens: Some(false),
-                ..Default::default()
-            })
-        } else {
-            None
-        };
-
-        self.decode_router
-            .find_best_match(
-                None,
-                tokens,
-                None,
-                config_override.as_ref(),
-                false,
-                None,
-                priority_jump,
-                expected_output_tokens,
-                allowed_worker_ids,
-                RoutingConstraints::default(),
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("Decode query failed: {:?}", e))
     }
 
     /// Register a request with the decode router for bookkeeping.
@@ -1602,34 +1515,10 @@ impl EndpointPicker for Router {
         // Precise external mode: tokenize via the sidecar (one local hop, not a
         // second round-trip to a worker). Otherwise tokenize locally (the
         // dynamo-worker preprocessor) or use the load-aware placeholder.
-        // Routing hints (priority, expected output length / OSL) from
-        // nvext.agent_hints, parsed independently of the tokenization mode
-        // (sidecar tokenization returns tokens only and would otherwise drop
-        // them). OSL feeds the decode-load projection in the scheduler so a
-        // worker holding many long-output requests is scored as more loaded.
-        let (priority_jump, osl) = extract_hints(body_str);
-        let tokens = self
-            .tokenizer
-            .tokenize_for_routing(body_str)
-            .await
-            .map_err(|e| PickError::TokenizationFailed(e.to_string()))?;
-
-        // Try prefill routing first (disaggregated mode).
-        //
-        // If the prefill router is not activated (no prefill workers
-        // discovered yet, or the inner router has been deactivated), this
-        // returns an error. Behavior on that error depends on
-        // `DYN_ENFORCE_DISAGG`:
-        //
-        // * `enforce_disagg = false` (default): fall back to aggregated
-        //   (decode-only) routing — matches `PrefillRouter::generate`.
-        // * `enforce_disagg = true`: surface the error to Envoy and let the
-        //   request fail. Silently downgrading to aggregated would defeat
-        //   the operator's explicit "strict disagg" policy.
         // Partition candidates into prefill/decode workers by the Dynamo role
         // label (K8s-native disaggregation, no runtime). An unlabeled or
         // aggregated pool yields an empty prefill set, so prefill routing is
-        // skipped and we serve aggregated — unchanged behavior.
+        // skipped and the request is served aggregated.
         let (prefill_ids, decode_ids) = {
             let base = match &allowed_worker_ids {
                 Some(ids) => ids.clone(),
@@ -1638,36 +1527,20 @@ impl EndpointPicker for Router {
             self.partition_worker_roles(&base)
         };
 
-        let prefill_result = if prefill_ids.is_empty() {
-            Err(anyhow::anyhow!("no prefill-role workers in candidate set"))
-        } else {
-            self.route_prefill(&tokens, priority_jump, Some(prefill_ids))
-                .await
-        };
-
-        let is_disaggregated = match &prefill_result {
-            Ok(_) => true,
-            Err(e) => {
-                if self.prefill_router.enforce_disagg() {
-                    tracing::warn!(
-                        error = %e,
-                        request_id = %req.request_id,
-                        "Prefill routing failed under DYN_ENFORCE_DISAGG=true; failing request"
-                    );
-                    return Err(PickError::RoutingFailed(format!(
-                        "prefill routing failed under enforce_disagg: {e}"
-                    )));
-                }
-                tracing::debug!(
-                    error = %e,
-                    "Prefill routing failed; falling back to aggregated mode"
-                );
-                false
-            }
-        };
-
-        let (decode_worker, _overlap) = self
-            .route_decode(&tokens, is_disaggregated, priority_jump, osl, Some(decode_ids))
+        // Shared routing decision: tokenize → hints → prefill/decode select. On
+        // prefill failure the service falls back to aggregated unless
+        // DYN_ENFORCE_DISAGG is set (then it errors). Booking, endpoint
+        // resolution and header emission stay below in this ext_proc adapter.
+        let RoutingDecision {
+            tokens,
+            priority_jump,
+            osl,
+            decode_worker,
+            prefill_worker,
+            is_disaggregated,
+        } = self
+            .routing_service
+            .route(body_str, prefill_ids, decode_ids)
             .await
             .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
 
@@ -1717,7 +1590,7 @@ impl EndpointPicker for Router {
         // Disagg: also book prefill load on the selected prefill worker so peer
         // replicas see it (released on prefill completion). No-op unless
         // replica sync is enabled and the prefill router is in KV mode.
-        if let Ok((prefill_worker_id, prefill_dp_rank)) = &prefill_result
+        if let Some((prefill_worker_id, prefill_dp_rank)) = &prefill_worker
             && !req.request_id.is_empty()
         {
             self.book_prefill(
@@ -1740,7 +1613,7 @@ impl EndpointPicker for Router {
             ("x-dp-rank".to_string(), decode_worker.dp_rank.to_string()),
         ];
 
-        if let Ok((prefill_worker_id, prefill_dp_rank)) = &prefill_result {
+        if let Some((prefill_worker_id, prefill_dp_rank)) = &prefill_worker {
             headers.push((
                 "x-dynamo-routing-mode".to_string(),
                 "disaggregated".to_string(),
