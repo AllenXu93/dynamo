@@ -465,8 +465,11 @@ impl PrefillRouter {
 
     /// Drive cross-replica sequence sync for the prefill router's slot tracker
     /// from an externally-supplied subscriber. No-op unless in KV mode.
-    pub fn start_replica_sync<S>(&self, subscriber: S, cancel_token: tokio_util::sync::CancellationToken)
-    where
+    pub fn start_replica_sync<S>(
+        &self,
+        subscriber: S,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) where
         S: SequenceSubscriber + 'static,
     {
         if let Some(InnerPrefillRouter::KvRouter(r)) = self.prefill_router.get() {
