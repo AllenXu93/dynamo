@@ -17,7 +17,9 @@ use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
-use dynamo_llm::kv_router::routing::extract_hints;
+use dynamo_llm::kv_router::routing::{
+    LoadPlaceholderTokenizer, PreprocessorTokenizer, RequestTokenizer, extract_hints,
+};
 use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
@@ -90,10 +92,11 @@ pub struct Router {
     /// `None` in external (vanilla-vLLM) mode: the worker tokenizes and the EPP
     /// routes load-aware without replicating the worker's tokenizer config.
     preprocessor: Option<Arc<OpenAIPreprocessor>>,
-    /// Shared HTTP client (bounded timeout) for the tokenizer sidecar, so each
-    /// pick reuses connections and a stalled sidecar can't pile up stuck
-    /// routing tasks.
-    http_client: reqwest::Client,
+    /// Tokenizer that produces routing token IDs — a shared abstraction
+    /// (`dynamo_llm::kv_router::routing`): in-process preprocessor (dynamo
+    /// mode), a sidecar over a bounded-timeout HTTP client (external precise),
+    /// or a load-aware placeholder. The standalone router uses the same trait.
+    tokenizer: Arc<dyn RequestTokenizer>,
     runtime: Runtime,
     /// Port to route to on each pod, from the InferencePool's `targetPorts`
     /// (or `DYN_EPP_TARGET_PORT`). `None` falls back to the container port named
@@ -331,11 +334,21 @@ impl Router {
             .build()
             .expect("failed to build tokenizer HTTP client");
 
+        // One shared tokenizer for routing: sidecar (external precise),
+        // in-process preprocessor (dynamo mode), or load-aware placeholder.
+        let tokenizer: Arc<dyn RequestTokenizer> = if let Some(url) = tokenize_url.clone() {
+            Arc::new(SidecarTokenizer::new(http_client, url))
+        } else if let Some(pp) = preprocessor.clone() {
+            Arc::new(PreprocessorTokenizer::new(pp))
+        } else {
+            Arc::new(LoadPlaceholderTokenizer)
+        };
+
         Ok(Self {
             prefill_router,
             decode_router,
             preprocessor,
-            http_client,
+            tokenizer,
             runtime,
             target_port,
             tokenize_url,
@@ -344,43 +357,6 @@ impl Router {
             replica_publisher,
             prefill_publisher,
         })
-    }
-
-    /// Tokenize a JSON request body and extract the router-relevant
-    /// `priority_jump` from `nvext.agent_hints.priority`.
-    ///
-    /// Returns `(token_ids, priority_jump)`. `priority_jump` is `0.0` when no
-    /// hint is present. Mirrors the standalone Dynamo preprocessor lift in
-    /// `lib/llm/src/preprocessor.rs` so this gateway path produces the same
-    /// queue ordering as a non-GAIE deployment.
-    pub fn tokenize(&self, request_json: &str) -> Result<(Vec<u32>, f64)> {
-        // External (no-tokenizer) mode. Two strategies:
-        //   * "precise" (DYN_EPP_PREFIX_MODE=precise): exact query tokens come
-        //     from a tokenizer sidecar (DYN_EPP_TOKENIZE_URL) — handled
-        //     asynchronously in `pick`, so this sync path is not reached.
-        //   * "load" (default): no tokenizer; return placeholder tokens sized
-        //     to the request (the scheduler asserts isl > 0). Pair with
-        //     DYN_OVERLAP_SCORE_WEIGHT=0 for pure load-aware routing.
-        let Some(preprocessor) = self.preprocessor.as_ref() else {
-            const AVG_CHARS_PER_TOKEN: usize = 4;
-            // No tokenizer, but still honor nvext.agent_hints.priority so a
-            // vanilla-vLLM request keeps its scheduler priority.
-            let (priority_jump, _osl) = extract_hints(request_json);
-            return Ok((
-                vec![0u32; (request_json.len() / AVG_CHARS_PER_TOKEN).max(1)],
-                priority_jump,
-            ));
-        };
-
-        let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
-            serde_json::from_str(request_json)?;
-
-        let priority_jump = extract_priority_jump(&request);
-
-        let formatted_prompt = preprocessor.apply_template(&request)?.unwrap_or_default();
-
-        let encoding = preprocessor.tokenize(&formatted_prompt)?;
-        Ok((encoding.token_ids().to_vec(), priority_jump))
     }
 
     /// Resolve a worker_id to a pod endpoint address (ip:port).
@@ -892,29 +868,6 @@ async fn spawn_replica_sync(
     Ok((decode_pub, prefill_pub))
 }
 
-/// Extract the router queue `priority_jump` from a chat completion request's
-/// `nvext.agent_hints.priority`.
-///
-/// Negative priorities are clamped to `0.0` so a low-priority hint never
-/// pushes a request behind FCFS arrivals (matches the standalone preprocessor
-/// in `lib/llm/src/preprocessor.rs`). Falls back to the deprecated
-/// `latency_sensitivity` alias for callers still on the old field name.
-/// Returns `0.0` when `nvext` is absent.
-fn extract_priority_jump(
-    request: &dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
-) -> f64 {
-    request
-        .nvext
-        .as_ref()
-        .and_then(|n| n.agent_hints.as_ref())
-        .and_then(|h| {
-            h.priority
-                .map(|p| p.max(0) as f64)
-                .or(h.latency_sensitivity)
-        })
-        .unwrap_or(0.0)
-}
-
 struct DiscoveredModelBootstrap {
     preprocessor: Arc<OpenAIPreprocessor>,
     card: ModelDeploymentCard,
@@ -1132,6 +1085,27 @@ fn pod_is_ready(pod: &k8s_openapi::api::core::v1::Pod) -> bool {
 /// worker caches; the request forwards `model` plus `messages` or `prompt`. The
 /// response is expected to contain a `tokens` array of integer IDs (vLLM's
 /// `/tokenize` shape: `{"count": N, "tokens": [...]}`).
+/// Tokenizer that calls a co-located tokenizer **sidecar** over HTTP (external
+/// precise mode). The sidecar client lives in the EPP crate because it needs
+/// `reqwest`; the routing core only sees the `RequestTokenizer` trait.
+struct SidecarTokenizer {
+    client: reqwest::Client,
+    url: String,
+}
+
+impl SidecarTokenizer {
+    fn new(client: reqwest::Client, url: String) -> Self {
+        Self { client, url }
+    }
+}
+
+#[tonic::async_trait]
+impl RequestTokenizer for SidecarTokenizer {
+    async fn tokenize_for_routing(&self, body: &str) -> anyhow::Result<Vec<u32>> {
+        remote_tokenize(&self.client, &self.url, body).await
+    }
+}
+
 async fn remote_tokenize(
     client: &reqwest::Client,
     url: &str,
@@ -1634,15 +1608,11 @@ impl EndpointPicker for Router {
         // them). OSL feeds the decode-load projection in the scheduler so a
         // worker holding many long-output requests is scored as more loaded.
         let (priority_jump, osl) = extract_hints(body_str);
-        let tokens = if let Some(url) = self.tokenize_url.as_deref() {
-            remote_tokenize(&self.http_client, url, body_str)
-                .await
-                .map_err(|e| PickError::TokenizationFailed(e.to_string()))?
-        } else {
-            self.tokenize(body_str)
-                .map_err(|e| PickError::TokenizationFailed(e.to_string()))?
-                .0
-        };
+        let tokens = self
+            .tokenizer
+            .tokenize_for_routing(body_str)
+            .await
+            .map_err(|e| PickError::TokenizationFailed(e.to_string()))?;
 
         // Try prefill routing first (disaggregated mode).
         //
@@ -1877,31 +1847,4 @@ impl EndpointPicker for Router {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Proves the core feature: `nvext.agent_hints.priority` lifts into a
-    /// non-zero `priority_jump`, and absence collapses to `0.0`. If this
-    /// regresses, the GAIE ext-proc path is back to ignoring priority.
-    #[test]
-    fn priority_jump_lifted_from_agent_hints_priority() {
-        let with_priority: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
-            serde_json::from_str(
-                r#"{
-                    "model": "test",
-                    "messages": [{"role": "user", "content": "hi"}],
-                    "nvext": {"agent_hints": {"priority": 5}}
-                }"#,
-            )
-            .unwrap();
-        assert_eq!(extract_priority_jump(&with_priority), 5.0);
-
-        let without_nvext: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
-            serde_json::from_str(
-                r#"{
-                    "model": "test",
-                    "messages": [{"role": "user", "content": "hi"}]
-                }"#,
-            )
-            .unwrap();
-        assert_eq!(extract_priority_jump(&without_nvext), 0.0);
-    }
 }

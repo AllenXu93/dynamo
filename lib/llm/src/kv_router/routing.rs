@@ -6,8 +6,13 @@
 //! single implementation rather than one copy per front end.
 //!
 //! This is the first piece of that shared surface: parsing the router-relevant
-//! hints out of an OpenAI request body. The tokenizer abstraction and the
-//! select/book orchestration move here incrementally.
+//! hints out of an OpenAI request body, plus the tokenizer abstraction. The
+//! select/book orchestration moves here incrementally.
+
+use std::sync::Arc;
+
+use crate::preprocessor::OpenAIPreprocessor;
+use crate::types::openai::chat_completions::NvCreateChatCompletionRequest;
 
 /// Parse routing hints — `priority_jump` and expected output length (`osl`) —
 /// from `nvext.agent_hints`, directly from the raw request body so they survive
@@ -38,22 +43,71 @@ pub fn extract_hints(body_str: &str) -> (f64, Option<u32>) {
     (priority_jump, osl)
 }
 
+/// Tokenize a request body into the token IDs used for routing (KV-prefix
+/// matching / load projection). Implemented per front end so the routing core
+/// stays tokenizer-agnostic and the gateway EPP and the standalone router share
+/// it rather than each carrying a copy.
+#[async_trait::async_trait]
+pub trait RequestTokenizer: Send + Sync {
+    async fn tokenize_for_routing(&self, body: &str) -> anyhow::Result<Vec<u32>>;
+}
+
+/// Exact in-process tokenization via the model's [`OpenAIPreprocessor`] — parity
+/// with a Dynamo worker / the standalone router (applies the chat template, then
+/// tokenizes).
+pub struct PreprocessorTokenizer {
+    preprocessor: Arc<OpenAIPreprocessor>,
+}
+
+impl PreprocessorTokenizer {
+    pub fn new(preprocessor: Arc<OpenAIPreprocessor>) -> Self {
+        Self { preprocessor }
+    }
+}
+
+#[async_trait::async_trait]
+impl RequestTokenizer for PreprocessorTokenizer {
+    async fn tokenize_for_routing(&self, body: &str) -> anyhow::Result<Vec<u32>> {
+        let request: NvCreateChatCompletionRequest = serde_json::from_str(body)?;
+        let formatted = self
+            .preprocessor
+            .apply_template(&request)?
+            .unwrap_or_default();
+        Ok(self.preprocessor.tokenize(&formatted)?.token_ids().to_vec())
+    }
+}
+
+/// Load-aware placeholder: no real tokenization; returns a token vector sized to
+/// the request so the scheduler sees `isl > 0` (pair with overlap weight 0 for
+/// pure load-aware routing).
+pub struct LoadPlaceholderTokenizer;
+
+#[async_trait::async_trait]
+impl RequestTokenizer for LoadPlaceholderTokenizer {
+    async fn tokenize_for_routing(&self, body: &str) -> anyhow::Result<Vec<u32>> {
+        const AVG_CHARS_PER_TOKEN: usize = 4;
+        Ok(vec![0u32; (body.len() / AVG_CHARS_PER_TOKEN).max(1)])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn hints_parsed_from_nvext_agent_hints() {
-        let (p, osl) = extract_hints(
-            r#"{"prompt":"hi","nvext":{"agent_hints":{"priority":5,"osl":128}}}"#,
-        );
+        let (p, osl) =
+            extract_hints(r#"{"prompt":"hi","nvext":{"agent_hints":{"priority":5,"osl":128}}}"#);
         assert_eq!(p, 5.0);
         assert_eq!(osl, Some(128));
     }
 
     #[test]
     fn negative_priority_clamped_and_absent_hints_default() {
-        assert_eq!(extract_hints(r#"{"nvext":{"agent_hints":{"priority":-3}}}"#).0, 0.0);
+        assert_eq!(
+            extract_hints(r#"{"nvext":{"agent_hints":{"priority":-3}}}"#).0,
+            0.0
+        );
         assert_eq!(extract_hints(r#"{"prompt":"hi"}"#), (0.0, None));
         assert_eq!(extract_hints("not json"), (0.0, None));
     }
