@@ -17,6 +17,7 @@ use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
+use dynamo_llm::kv_router::routing::extract_hints;
 use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
@@ -899,30 +900,6 @@ async fn spawn_replica_sync(
 /// in `lib/llm/src/preprocessor.rs`). Falls back to the deprecated
 /// `latency_sensitivity` alias for callers still on the old field name.
 /// Returns `0.0` when `nvext` is absent.
-/// Parse routing hints — `priority_jump` and expected output length (`osl`) —
-/// from `nvext.agent_hints`, directly from the raw request body so they survive
-/// both tokenization modes (the sidecar tokenizer returns tokens only) and both
-/// request shapes (chat + completion). Returns `(0.0, None)` on parse failure.
-fn extract_hints(body_str: &str) -> (f64, Option<u32>) {
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(body_str) else {
-        return (0.0, None);
-    };
-    let hints = v.get("nvext").and_then(|n| n.get("agent_hints"));
-    let priority_jump = hints
-        .and_then(|h| {
-            h.get("priority")
-                .and_then(|p| p.as_i64())
-                .map(|p| p.max(0) as f64)
-                .or_else(|| h.get("latency_sensitivity").and_then(|l| l.as_f64()))
-        })
-        .unwrap_or(0.0);
-    let osl = hints
-        .and_then(|h| h.get("osl"))
-        .and_then(|o| o.as_u64())
-        .map(|o| o as u32);
-    (priority_jump, osl)
-}
-
 fn extract_priority_jump(
     request: &dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
 ) -> f64 {

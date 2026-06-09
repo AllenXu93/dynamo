@@ -47,6 +47,7 @@ pub mod metrics;
 pub mod prefill_router;
 pub mod publisher;
 pub mod push_router;
+pub mod routing;
 mod route_lookup;
 pub mod scheduler;
 mod scheduler_inputs;
