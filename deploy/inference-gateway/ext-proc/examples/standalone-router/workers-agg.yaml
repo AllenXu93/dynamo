@@ -1,0 +1,69 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Two aggregated stock `vllm serve` pods for the standalone-router example. No
+# Dynamo runtime, no disaggregation, no gateway: each pod is a single-rank
+# worker (scale data parallelism by adding more pods/endpoints — the standard
+# vLLM external-LB pattern). They are discovered by the standalone frontend via
+# the plain label selector `app=epp-vanilla-vllm` (DYN_EPP_POD_SELECTOR), so no
+# InferencePool / HTTPRoute is required. KV-cache events are published over ZMQ
+# so the router's load/prefix view is precise.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: epp-vanilla-agg-0
+  namespace: mkhadkevich-dev
+  labels:
+    app: epp-vanilla-vllm
+    owner: claude-epp
+spec:
+  restartPolicy: Never
+  tolerations:
+  - key: nvidia.com/gpu
+    value: "true"
+    effect: NoSchedule
+  containers:
+  - name: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+    command: ["vllm", "serve", "Qwen/Qwen3-0.6B"]
+    args:
+    - --port=8000
+    - --gpu-memory-utilization=0.45
+    - --max-model-len=8192
+    - --enable-prefix-caching
+    - --kv-events-config={"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557"}
+    ports:
+    - {containerPort: 8000}
+    - {containerPort: 5557}
+    resources:
+      limits: {nvidia.com/gpu: "1"}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: epp-vanilla-agg-1
+  namespace: mkhadkevich-dev
+  labels:
+    app: epp-vanilla-vllm
+    owner: claude-epp
+spec:
+  restartPolicy: Never
+  tolerations:
+  - key: nvidia.com/gpu
+    value: "true"
+    effect: NoSchedule
+  containers:
+  - name: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0
+    command: ["vllm", "serve", "Qwen/Qwen3-0.6B"]
+    args:
+    - --port=8000
+    - --gpu-memory-utilization=0.45
+    - --max-model-len=8192
+    - --enable-prefix-caching
+    - --kv-events-config={"enable_kv_cache_events":true,"publisher":"zmq","endpoint":"tcp://*:5557"}
+    ports:
+    - {containerPort: 8000}
+    - {containerPort: 5557}
+    resources:
+      limits: {nvidia.com/gpu: "1"}

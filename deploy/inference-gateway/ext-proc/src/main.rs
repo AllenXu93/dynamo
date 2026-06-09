@@ -210,6 +210,18 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Standalone HTTP-frontend mode: serve the routing decision directly over
+    // HTTP (no gateway/Envoy, no Dynamo runtime) instead of the ext_proc gRPC
+    // service. Reuses the very same `Router` (shared routing core + pod-reflector
+    // discovery + ZMQ KV ingestion) and proxies the request to the selected
+    // worker. The gRPC health + Prometheus servers started above keep running.
+    if parse_env("DYN_EPP_HTTP_FRONTEND", false) {
+        tracing::info!(
+            "DYN_EPP_HTTP_FRONTEND=true: running standalone HTTP frontend (no gateway, no runtime)"
+        );
+        return dynamo_ext_proc::http_frontend::run(Arc::new(router)).await;
+    }
+
     let picker = Arc::new(router);
     let server = ExtProcServer::new(picker);
     // Default to TLS to match the Go EPP behavior. Verified working with

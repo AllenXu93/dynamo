@@ -14,6 +14,7 @@
 
 pub mod envoy_helpers;
 pub mod epp;
+pub mod http_frontend;
 pub mod picker;
 pub mod proto;
 pub mod replica_sync;

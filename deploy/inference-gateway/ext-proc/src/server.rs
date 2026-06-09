@@ -645,7 +645,7 @@ fn validate_protocol_config(
 /// Inject pre-computed token IDs into the request body JSON as
 /// `nvext.token_data`. This lets the backend skip redundant tokenization.
 /// Mirrors Go EPP's `setTokenizedPrompt` in `shared.go`.
-fn inject_token_data(body: &[u8], token_ids: &[u32]) -> anyhow::Result<Vec<u8>> {
+pub(crate) fn inject_token_data(body: &[u8], token_ids: &[u32]) -> anyhow::Result<Vec<u8>> {
     let mut parsed: serde_json::Value = serde_json::from_slice(body)?;
 
     let obj = parsed
@@ -675,7 +675,7 @@ fn inject_token_data(body: &[u8], token_ids: &[u32]) -> anyhow::Result<Vec<u8>> 
 
 /// Extract the "model" field from a JSON request body.
 /// Mirrors Go LW-EPP `extractModelFromBody`.
-fn extract_model_from_body(body: &[u8]) -> String {
+pub(crate) fn extract_model_from_body(body: &[u8]) -> String {
     #[derive(serde::Deserialize)]
     struct ModelField {
         model: Option<String>,
