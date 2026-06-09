@@ -56,7 +56,8 @@ such dependency.
 ## Run
 
 ```bash
-kubectl apply -f workers-agg.yaml
+# The manifest sets no namespace; pick one with -n.
+kubectl -n <namespace> apply -f workers-agg.yaml
 
 # In the EPP/router pod (the dynamo-ext-proc binary built at
 # /work/dynamo/target/release):

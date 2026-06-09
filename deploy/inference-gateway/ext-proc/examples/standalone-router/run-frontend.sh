@@ -12,7 +12,7 @@
 #
 # Arg 1 = HTTP listen port (default 8000).
 cd /work
-export DYN_DISCOVERY_BACKEND=mem POD_NAMESPACE="${POD_NAMESPACE:-mkhadkevich-dev}" DYN_EPP_EXTERNAL=true
+export DYN_DISCOVERY_BACKEND=mem POD_NAMESPACE="${POD_NAMESPACE:-default}" DYN_EPP_EXTERNAL=true
 export DYN_MODEL_NAME="${DYN_MODEL_NAME:-Qwen/Qwen3-0.6B}" DYN_KV_CACHE_BLOCK_SIZE=16
 
 # Gateway-free discovery: select worker pods directly by label + target port

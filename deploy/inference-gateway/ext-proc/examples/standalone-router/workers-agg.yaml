@@ -12,7 +12,6 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: epp-vanilla-agg-0
-  namespace: mkhadkevich-dev
   labels:
     app: epp-vanilla-vllm
     owner: claude-epp
@@ -42,7 +41,6 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: epp-vanilla-agg-1
-  namespace: mkhadkevich-dev
   labels:
     app: epp-vanilla-vllm
     owner: claude-epp
