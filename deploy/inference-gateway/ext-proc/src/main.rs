@@ -166,10 +166,10 @@ async fn main() -> Result<()> {
     // frontend serves. Lets an EPP replica's load view (incl. peer-synced load)
     // be scraped like the standalone router.
     let metrics_port = parse_env("DYN_EPP_METRICS_PORT", METRICS_PORT);
-    if metrics_port != 0 {
-        if let Err(e) = metrics_server::spawn_metrics_server(metrics_port).await {
-            tracing::warn!(error = %e, "failed to start EPP metrics server");
-        }
+    if metrics_port != 0
+        && let Err(e) = metrics_server::spawn_metrics_server(metrics_port).await
+    {
+        tracing::warn!(error = %e, "failed to start EPP metrics server");
     }
 
     tracing::info!("Initializing KV-aware router from discovery...");

@@ -1715,8 +1715,3 @@ impl EndpointPicker for Router {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-}
