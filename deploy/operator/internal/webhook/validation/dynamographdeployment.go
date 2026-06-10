@@ -26,6 +26,7 @@ import (
 
 	semver "github.com/Masterminds/semver/v3"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	operatorcommon "github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
@@ -471,11 +472,7 @@ func (v *DynamoGraphDeploymentValidator) validateServiceNameLength(serviceName s
 // Grove requires both operator-level enablement and the per-DGD annotation not
 // being explicitly set to "false".
 func (v *DynamoGraphDeploymentValidator) isGrovePathway() bool {
-	if !v.groveEnabled {
-		return false
-	}
-	return v.deployment.Annotations == nil ||
-		strings.ToLower(v.deployment.Annotations[consts.KubeAnnotationEnableGrove]) != consts.KubeLabelValueFalse
+	return operatorcommon.IsGrovePathway(v.groveEnabled, v.deployment.Annotations)
 }
 
 // validatePVCs validates the PVC configurations.
