@@ -70,9 +70,11 @@ spec:
   - interval: 5s
     path: /metrics
     port: system
+{{- if .Values.dynamo.metrics.podMonitors.nixlTelemetry }}
   - interval: 5s
     path: /metrics
     port: nixl
+{{- end }}
   selector:
     matchLabels:
       nvidia.com/dynamo-component-type: worker
