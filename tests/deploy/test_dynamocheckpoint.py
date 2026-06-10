@@ -231,6 +231,7 @@ async def _scale_decode_component(deployment: ManagedDeployment, replicas: int) 
     for component in components:
         if component.get("name") == DECODE_COMPONENT:
             component["replicas"] = replicas
+            component["minAvailable"] = 0 if replicas == 0 else 1
             break
     else:
         raise AssertionError(f"component {DECODE_COMPONENT!r} not found")
