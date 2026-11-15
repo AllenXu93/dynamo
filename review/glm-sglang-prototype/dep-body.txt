@@ -1,0 +1,43 @@
+Title: DEP (light): unify GLM output parsing in the SGLang chat processor
+Suggested labels: dep:draft, dep:lightweight, frontend
+Status: local proposal; not filed
+
+## Summary
+
+Use one request-scoped GLM state machine to distinguish reasoning, visible text and tool arguments on the SGLang chat-processor path. Retain SGLang's prompt rendering, tokenizer and engine. The design choice between an upstream SGLang implementation and reuse of Dynamo's Rust unified parser needs maintainer agreement before implementation is submitted.
+
+## Motivation
+
+Serial reasoning and tool parsing loses boundary ownership: `<think>` inside an argument may be consumed as reasoning, while repeated reasoning spans and dense multiple calls can be misclassified or reordered. Output must remain invariant under worker batching.
+
+## Proposal
+
+1. Establish a scoped GLM adapter behind the existing processor selection. Other families keep their existing path.
+2. Initialize it from the rendered/request-level reasoning state in both inline and pool construction paths. Do not rely on test-only initialization overrides.
+3. Carry native/guided output mode, selected function, enabled tool parsing, and actual generation-constraint argument framing explicitly. Empty tools continues to disable tool parsing.
+4. Emit ordered text/reasoning/tool deltas, stable tool indices and IDs, raw JSON argument strings, and exactly one finish/usage accounting boundary per underlying worker batch.
+5. If reusing Rust, use the repository's existing parser dependency policy. Avoid adding a second independently pinned parser version. Prefer typed PyO3 results over a JSON encode/decode round trip per chunk.
+6. Preserve current-main stop-token handling, guided_json_is_content semantics, Responses behavior and existing EOF recovery policies.
+
+## Alternatives and decision needed
+
+- Fix or extend native SGLang parsing/recipe support and reuse that API. This preserves backend ownership and avoids a new FFI surface.
+- Reuse Dynamo's unified parser through a narrow internal binding. This consolidates protocol handling but adds cross-language initialization, framing and performance obligations.
+- Keep separate parsers with local special cases. Smaller patches may recover missing calls, but do not solve the general ownership problem.
+
+## Acceptance criteria
+
+- Reproduce targeted failures on current upstream main before claiming an upstream fix.
+- Exercise public generator construction in inline and pool modes: auto/required/named tools, thinking on/off, separate_reasoning=false and empty tools.
+- Cover literal reasoning markers in strings and literal closing argument markers in constrained JSON objects/arrays.
+- Prove chunk-invariant channel order, tool argument precision, finish reasons, stop behavior and non-duplicated usage/logprobs/metrics.
+- Build the complete extension/wheel and run the relevant upstream SGLang tests.
+- Measure the hot-path allocation/GIL and event-rate impact before enabling the bridge; make no performance claim from protocol replay.
+
+## References
+
+https://github.com/ai-dynamo/frontend-crates/tree/ba656192a8cb12abc10a2b08bdf7be0780df4091
+https://github.com/ai-dynamo/dynamo/pull/18770
+https://github.com/ai-dynamo/dynamo/pull/18235
+
+The development replay results and their limitations are in validation.json. This proposal does not claim that the current prototype is ready to merge.

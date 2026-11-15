@@ -1,0 +1,81 @@
+{
+  "scope": "Explicit-initialization output-pipeline replay on development checkout; not upstream-main, public generator, HTTP, wheel-build or model qualification.",
+  "development_base": "Unpublished development snapshot; not an upstream qualification",
+  "upstream_review_base": "b20fe6fe94",
+  "corpus_repo": "https://github.com/ai-dynamo/frontend-crates",
+  "corpus_revision": "ba656192a8cb12abc10a2b08bdf7be0780df4091",
+  "sglang_version": "0.5.23",
+  "xgrammar_version": "0.2.7",
+  "cases": 301,
+  "schedules": {
+    "authored": {
+      "before": {
+        "MATCH": 205,
+        "LEAK": 26,
+        "ORDER": 20,
+        "ARG_MISMATCH": 24,
+        "LOSS": 26
+      },
+      "after": {
+        "MATCH": 300,
+        "LOSS": 1
+      },
+      "improved": 95,
+      "regressed": 0,
+      "unchanged_output": 206,
+      "projection_match_before": 218,
+      "projection_match_after": 300,
+      "mixed_frames_before": 0,
+      "mixed_frames_after": 0
+    },
+    "single": {
+      "before": {
+        "MATCH": 195,
+        "ORDER": 22,
+        "LEAK": 6,
+        "MERGE": 13,
+        "LOSS": 44,
+        "ARG_MISMATCH": 21
+      },
+      "after": {
+        "MATCH": 300,
+        "LOSS": 1
+      },
+      "improved": 105,
+      "regressed": 0,
+      "unchanged_output": 196,
+      "projection_match_before": 204,
+      "projection_match_after": 300,
+      "mixed_frames_before": 21,
+      "mixed_frames_after": 0
+    },
+    "char": {
+      "before": {
+        "MATCH": 205,
+        "LEAK": 26,
+        "ORDER": 18,
+        "ARG_MISMATCH": 24,
+        "LOSS": 28
+      },
+      "after": {
+        "MATCH": 300,
+        "LOSS": 1
+      },
+      "improved": 95,
+      "regressed": 0,
+      "unchanged_output": 206,
+      "projection_match_before": 220,
+      "projection_match_after": 300,
+      "mixed_frames_before": 0,
+      "mixed_frames_after": 0
+    }
+  },
+  "remaining_policy": "Empty tools disables tool parsing in both Dynamo variants; reference still recognizes calls.",
+  "limitations": [
+    "Fixture start state passed explicitly to new postprocessor; production generator initialization not validated by these counts.",
+    "Native object-valued argument containing literal </arg_value> can be truncated under Lenient framing.",
+    "Complete extension/wheel not built; production Rust bridge tested as a separate PyO3 module.",
+    "No latency, throughput, GIL or allocation benchmark.",
+    "Prototype does not apply cleanly to current upstream main."
+  ]
+}

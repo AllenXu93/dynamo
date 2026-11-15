@@ -1,0 +1,20 @@
+Readiness: BLOCKED FOR IMPLEMENTATION PR; suitable for local issue/DEP discussion drafts.
+
+P1 — Production initialization differs from replay initialization.
+paired_dynamo_replay.py passes parser_starting_state explicitly only when supported by the patched class. Production inline/pool constructors infer the state. For 33 GuidedJson + None cases, this can select Response in production instead of None in replay. A native bridge check confirms this changes reasoning-vs-content output. Add public generator/inline+pool regressions and rerun without test-only overrides.
+
+P1 — Constrained argument framing is absent.
+The bridge uses default Lenient framing. With x declared as object, this native input:
+<tool_call>f<arg_key>x</arg_key><arg_value>{"note":"literal </arg_value> tag"}</arg_value></tool_call>
+was observed to produce {"x":"{\"note\":\"literal "} with complete=true. Preserve the complete object under the actual constrained generation policy. Pass framing explicitly and test this behavior.
+
+Upstream adaptation — NOT DONE.
+The prototype does not apply to upstream b20fe6fe94. Preserve current stop_token_ids, delimiter retention, guided_json_is_content and centralized postprocessor factory. Current main already handles parallel_tool_calls defaults. Reconcile existing parser-v2 0.10.2 with prototype 0.10.7 instead of duplicating versions.
+
+Performance — MUST REVIEW.
+unified_chat_parser.rs allocates serde_json::Value nodes and serializes per chunk; Python immediately decodes them and creates aggregate and ordered structures. Prefer a typed FFI representation and avoid building duplicate output forms on the production path. No throughput/latency/GIL benchmark has been run.
+
+Validation boundary.
+The paired replay genuinely runs _generate_and_stream and the postprocessor under controlled fixed output. Same corpus, driver and per-case stimulus hashes were verified. It is not a full extension build, HTTP request, production initialization, actual tokenizer or model test. Mixed-channel frames also limit temporal-order interpretation of whole-input results. Empty-tools behavior is unchanged in both variants.
+
+Independent read-only correctness and testing reviews were completed. No issue/DEP/PR was published.

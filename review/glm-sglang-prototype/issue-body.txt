@@ -1,0 +1,55 @@
+Title: Investigate GLM reasoning/tool boundary handling in the SGLang chat processor
+
+## Summary
+
+A development checkout using `--dyn-chat-processor sglang`, `glm45` reasoning parsing and `glm47` tool parsing produced incorrect channel separation and argument values in deterministic output replays. This report is prepared for upstream investigation; reproduction on current main is still required.
+
+## Minimal protocol examples
+
+Offer a tool `log` with a string parameter `note`, then replay:
+
+<tool_call>log<arg_key>note</arg_key><arg_value><think>reconsider</think></arg_value></tool_call>
+
+Expected: a `log` call whose note is the literal string `<think>reconsider</think>`, with no reasoning event. The original development path instead extracted `reconsider` as reasoning and returned an empty note.
+
+Repeated reasoning spans provide another example:
+
+<think>first thought</think>interlude <think>second thought</think>done
+
+Expected: separate reasoning and visible-text runs. The original development path exposed the second reasoning envelope in content.
+
+Additional public request schemas, fixed outputs, expected events and prototype observations are in repro-cases.json. No returned function is executed by these replays.
+
+## Mechanism to investigate
+
+Reasoning is parsed before tool arguments. An independent reasoning detector cannot distinguish a reasoning delimiter from literal tool-argument data. The output wrapper also buffers tool calls until completion, which can lose event ordering and miss later calls depending on chunking.
+
+## Evidence and limits
+
+On a development checkout (not current upstream main), using SGLang 0.5.23 and the frontend-crates corpus at ba656192a8cb12abc10a2b08bdf7be0780df4091:
+
+| Input schedule | Original development path matches | Unified-parser prototype matches |
+| --- | ---: | ---: |
+| Authored chunks | 205 / 301 | 300 / 301 |
+| Whole input | 195 / 301 | 300 / 301 |
+| Character chunks | 205 / 301 | 300 / 301 |
+
+These are explicit-initialization output-pipeline replays through `_generate_and_stream`, with fixed routed output and a byte test tokenizer. They do not qualify public `generator()` initialization, real GLM tokenization, HTTP serving, a rebuilt Dynamo wheel, model behavior or performance. In particular, the replay explicitly passes fixture starting states to the prototype; the actual inline/pool construction paths still infer those states differently in some guided-output cases. Do not interpret these counts as current-main compatibility results.
+
+The remaining corpus mismatch has `tools=[]`: both Dynamo variants return markup as ordinary content, while the general parser reference recognizes calls without a schema. The prototype preserves Dynamo's existing empty-tool behavior.
+
+## Known prototype defect
+
+The bridge currently uses Lenient argument framing. For an object-valued parameter, a literal `</arg_value>` inside a JSON string can truncate the value. The prototype must pass the actual generation-constraint framing policy through to the unified parser before it is eligible as a fix.
+
+## Current upstream and related work
+
+Main reviewed at b20fe6fe94 already has different stop-token handling, guided-content handling and a centralized postprocessor factory. It also already defaults an omitted/null `parallel_tool_calls` to true; that change should not be resubmitted.
+
+- https://github.com/ai-dynamo/dynamo/pull/18770 — native SGLang DeepSeek recipe output parsing; review parser ownership/reuse conventions. Listing verified; full discussion still needs review.
+- https://github.com/ai-dynamo/dynamo/pull/18235 — forced native tool-call recovery for Hunyuan; adjacent wrapper changes, a different model format.
+- https://github.com/ai-dynamo/dynamo/issues/18573 — held-tool reasoning-token accounting; related observability concern, a different path.
+
+## Proposed next step
+
+Confirm the reproductions on current main and agree on parser ownership before opening an implementation PR. Consider the lightweight DEP draft for the cross-language unified-parser approach. The prototype patch is a reference implementation against the development base, not an upstream-ready patch.

@@ -1,0 +1,38 @@
+Provisional title: fix(frontend): preserve GLM reasoning and tool boundaries in the SGLang processor
+Readiness: NOT READY TO OPEN AS AN IMPLEMENTATION PR
+
+### Overview
+
+Preserve GLM reasoning, visible text and tool-call boundaries across worker chunking on the SGLang chat-processor path. The implementation direction requires issue/DEP discussion and current-main adaptation before this draft describes a final change.
+
+### Summary
+
+The development prototype retains SGLang input handling and uses a unified output parser. It handles repeated thoughts, literal reasoning markers in tool arguments, dense multiple calls and schema-driven argument conversion. It preserves empty-tools behavior.
+
+### Key Changes
+
+Proposed scope: frontend output adaptation, internal parser binding and targeted regressions. The current prototype is approximately medium-complexity shared frontend/FFI work and has not passed the upstream design, correctness or hot-path review gates. Final file links and exact core-logic line count must be regenerated after the port.
+
+### Validation
+
+See validation.json for the explicitly initialized development replay (205/301 to 300/301 on authored chunks). This is NOT validation of current main or the public generator path.
+
+Required before opening the implementation PR:
+- Fix the constrained-JSON closing-marker truncation defect.
+- Align production inline/pool initialization and replay initialization; add public generator regressions.
+- Port onto reviewed upstream SHA and rerun the paired corpus on that base.
+- Build the full wheel and run upstream checks; resolve or precisely baseline existing failures.
+- Evaluate hot-path JSON serialization, Python allocation and output-event rate.
+
+### Issues and Ongoing Work
+
+Tracking issue / DEP: not filed. Do not invent an issue number or add a closing reference until a real issue exists.
+
+Related: #18770 (DeepSeek recipe parser reuse), #18235 (Hunyuan forced-choice recovery), #18573 (reasoning token accounting).
+
+<details>
+<summary>Pull Request Checklist</summary>
+
+- [ ] Complete upstream pr-checklist after port and verification.
+
+</details>

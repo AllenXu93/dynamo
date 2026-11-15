@@ -1,0 +1,445 @@
+[
+  {
+    "scenario": "two_reason_spans",
+    "input": "<think>first thought</think>interlude <think>second thought</think>done",
+    "tools": [
+      {
+        "name": "get_weather",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "f",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "g",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "y": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "run",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "cmd": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "log",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "note": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "sum_values",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "values": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              }
+            }
+          }
+        }
+      },
+      {
+        "name": "functions.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    ],
+    "initial_state": {
+      "starting_state": "None",
+      "tool_output_mode": "Native",
+      "named_tool": null
+    },
+    "reference": [
+      {
+        "kind": "reasoning",
+        "text": "first thought"
+      },
+      {
+        "kind": "text",
+        "text": "interlude "
+      },
+      {
+        "kind": "reasoning",
+        "text": "second thought"
+      },
+      {
+        "kind": "text",
+        "text": "done"
+      }
+    ],
+    "prototype_before": [
+      {
+        "kind": "reasoning",
+        "text": "first thought"
+      },
+      {
+        "kind": "text",
+        "text": "interlude <think>second thought</think>done"
+      }
+    ],
+    "prototype_after": [
+      {
+        "kind": "reasoning",
+        "text": "first thought"
+      },
+      {
+        "kind": "text",
+        "text": "interlude "
+      },
+      {
+        "kind": "reasoning",
+        "text": "second thought"
+      },
+      {
+        "kind": "text",
+        "text": "done"
+      }
+    ]
+  },
+  {
+    "scenario": "reason_markup_in_arg",
+    "input": "<tool_call>log<arg_key>note</arg_key><arg_value><think>reconsider</think></arg_value></tool_call>",
+    "tools": [
+      {
+        "name": "get_weather",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "f",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "g",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "y": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "run",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "cmd": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "log",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "note": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "sum_values",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "values": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              }
+            }
+          }
+        }
+      },
+      {
+        "name": "functions.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    ],
+    "initial_state": {
+      "starting_state": "None",
+      "tool_output_mode": "Native",
+      "named_tool": null
+    },
+    "reference": [
+      {
+        "kind": "tool_call",
+        "name": "log",
+        "arguments": {
+          "note": "<think>reconsider</think>"
+        }
+      }
+    ],
+    "prototype_before": [
+      {
+        "kind": "reasoning",
+        "text": "reconsider"
+      },
+      {
+        "kind": "tool_call",
+        "name": "log",
+        "arguments": "{\"note\": \"\"}"
+      }
+    ],
+    "prototype_after": [
+      {
+        "kind": "tool_call",
+        "name": "log",
+        "arguments": "{\"note\":\"<think>reconsider</think>\"}"
+      }
+    ]
+  },
+  {
+    "scenario": "arg_json_null_nullable",
+    "input": "<tool_call>get_weather<arg_key>city</arg_key><arg_value>null</arg_value></tool_call>",
+    "tools": [
+      {
+        "name": "get_weather",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": {
+              "type": "string",
+              "nullable": true
+            }
+          }
+        }
+      }
+    ],
+    "initial_state": {
+      "starting_state": "None",
+      "tool_output_mode": "Native",
+      "named_tool": null
+    },
+    "reference": [
+      {
+        "kind": "tool_call",
+        "name": "get_weather",
+        "arguments": {
+          "city": null
+        }
+      }
+    ],
+    "prototype_before": [
+      {
+        "kind": "tool_call",
+        "name": "get_weather",
+        "arguments": "{\"city\": \"null\"}"
+      }
+    ],
+    "prototype_after": [
+      {
+        "kind": "tool_call",
+        "name": "get_weather",
+        "arguments": "{\"city\":null}"
+      }
+    ]
+  },
+  {
+    "scenario": "blank_framing_between_calls_single_chunk",
+    "input": "\n<tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value></tool_call>\n\n<tool_call>get_weather<arg_key>city</arg_key><arg_value>Tokyo</arg_value></tool_call>\n",
+    "tools": [
+      {
+        "name": "get_weather",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "f",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "g",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "y": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "run",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "cmd": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "log",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "note": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      {
+        "name": "sum_values",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "values": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              }
+            }
+          }
+        }
+      },
+      {
+        "name": "functions.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    ],
+    "initial_state": {
+      "starting_state": "None",
+      "tool_output_mode": "Native",
+      "named_tool": null
+    },
+    "reference": [
+      {
+        "kind": "text",
+        "text": "\n"
+      },
+      {
+        "kind": "tool_call",
+        "name": "get_weather",
+        "arguments": {
+          "city": "Paris"
+        }
+      },
+      {
+        "kind": "text",
+        "text": "\n\n"
+      },
+      {
+        "kind": "tool_call",
+        "name": "get_weather",
+        "arguments": {
+          "city": "Tokyo"
+        }
+      },
+      {
+        "kind": "text",
+        "text": "\n"
+      }
+    ],
+    "prototype_before": [
+      {
+        "kind": "text",
+        "text": "\n"
+      },
+      {
+        "kind": "tool_call",
+        "name": "get_weather",
+        "arguments": "{\"city\": \"Paris\"}"
+      }
+    ],
+    "prototype_after": [
+      {
+        "kind": "text",
+        "text": "\n"
+      },
+      {
+        "kind": "tool_call",
+        "name": "get_weather",
+        "arguments": "{\"city\":\"Paris\"}"
+      },
+      {
+        "kind": "text",
+        "text": "\n\n"
+      },
+      {
+        "kind": "tool_call",
+        "name": "get_weather",
+        "arguments": "{\"city\":\"Tokyo\"}"
+      },
+      {
+        "kind": "text",
+        "text": "\n"
+      }
+    ]
+  }
+]

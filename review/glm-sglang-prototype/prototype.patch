@@ -1,0 +1,1236 @@
+diff --git a/components/src/dynamo/frontend/sglang_prepost.py b/components/src/dynamo/frontend/sglang_prepost.py
+--- a/components/src/dynamo/frontend/sglang_prepost.py
++++ b/components/src/dynamo/frontend/sglang_prepost.py
+@@ -26,8 +26,9 @@
+     detect_jinja_template_content_format,
+     process_content_for_template_format,
+ )
+-from sglang.srt.parser.reasoning_parser import ReasoningParser
+-
++from sglang.srt.parser.reasoning_parser import Glm45Detector, ReasoningParser
++
++from dynamo._internal import UnifiedChatParser
+ from dynamo.common.utils.engine_response import trailing_stop_prefix_len
+ from dynamo.common.utils.guided_json import admits_only_empty_object
+ from dynamo.llm.exceptions import InvalidArgument
+@@ -612,7 +613,7 @@
+     if tool_choice == "none":
+         return None
+ 
+-    parallel_tool_calls = request.get("parallel_tool_calls")
++    parallel_tool_calls = request.get("parallel_tool_calls", True)
+     constraint: Any = None
+ 
+     if tool_choice == "required" or _is_named_tool_choice(tool_choice):
+@@ -1066,6 +1067,8 @@
+         prompt_token_ids: list[int] | None = None,
+         stop_strings: set[str] | None = None,
+         structured_guided_json: bool = False,
++        tool_choice: str | dict[str, Any] = "auto",
++        parser_starting_state: str | None = None,
+     ) -> None:
+         self.tokenizer = tokenizer
+         self.tool_call_parser = tool_call_parser
+@@ -1119,6 +1122,140 @@
+         self._tool_call_args: dict[int, list[str]] = {}  # tool_index -> arg chunks
+         # Full text accumulator for robust finish-time re-parse.
+         self._tool_text_parts: list[str] = []
++        self._unified_parser = None
++        self._ordered_choices: list[dict[str, Any]] | None = None
++        if (
++            self._tool_call_parser_name == "glm47"
++            and tool_call_parser is not None
++            and (
++                reasoning_parser is None
++                or isinstance(reasoning_parser.detector, Glm45Detector)
++            )
++        ):
++            starting_state = parser_starting_state
++            if starting_state is None:
++                if reasoning_parser is None:
++                    starting_state = "Response"
++                elif reasoning_parser.detector.force_reasoning:
++                    starting_state = "Reasoning"
++                else:
++                    starting_state = "None"
++            self._unified_parser = UnifiedChatParser(
++                json.dumps([tool.function.model_dump() for tool in self._sglang_tools]),
++                starting_state=starting_state,
++                guided=self._is_json_array_parser,
++                named_tool=(
++                    tool_choice["function"]["name"]
++                    if _is_named_tool_choice(tool_choice)
++                    else None
++                ),
++            )
++
++    def _process_unified_output(
++        self, text: str, finish_reason: str | None
++    ) -> dict[str, Any] | None:
++        events = json.loads(
++            self._unified_parser.advance(text, finish_reason is not None)
++        )
++        content = []
++        reasoning = []
++        calls = []
++        for event in events:
++            if event["kind"] == "text":
++                content.append(event["text"])
++            elif event["kind"] == "reasoning":
++                reasoning.append(event["text"])
++            else:
++                index = event["index"]
++                function = {"arguments": event["arguments"]}
++                call: dict[str, Any] = {"index": index, "function": function}
++                if event["name"] is not None:
++                    self._tool_call_names[index] = event["name"]
++                    function["name"] = event["name"]
++                    call["id"] = self._tool_call_id(event["name"], index)
++                    call["type"] = "function"
++                calls.append(call)
++        delta: dict[str, Any] = {}
++        if content:
++            delta["content"] = "".join(content)
++        if reasoning:
++            delta["reasoning_content"] = "".join(reasoning)
++        if calls:
++            delta["tool_calls"] = calls
++        if finish_reason == "stop" and self._tool_call_names:
++            finish_reason = "tool_calls"
++        if not delta and finish_reason is None:
++            return None
++        choice = {
++            "index": 0,
++            "delta": self._with_initial_role(delta),
++            "finish_reason": finish_reason,
++            "logprobs": self._take_pending_logprobs(),
++        }
++        ordered = []
++        call_events = iter(calls)
++        for event in events:
++            event_delta: dict[str, Any]
++            if event["kind"] in {"text", "reasoning"}:
++                key = "content" if event["kind"] == "text" else "reasoning_content"
++                event_delta = {key: event["text"]}
++            else:
++                event_delta = {"tool_calls": [next(call_events)]}
++            ordered.append(
++                {
++                    "index": 0,
++                    "delta": event_delta,
++                    "finish_reason": None,
++                    "logprobs": None,
++                }
++            )
++        if not ordered:
++            ordered.append({"index": 0, "delta": {}, "finish_reason": None})
++        if "role" in choice["delta"]:
++            ordered[0]["delta"]["role"] = choice["delta"]["role"]
++        ordered[-1]["finish_reason"] = finish_reason
++        ordered[-1]["logprobs"] = choice["logprobs"]
++        self._ordered_choices = ordered
++        return choice
++
++    def process_outputs(self, engine_response: dict[str, Any]) -> list[dict[str, Any]]:
++        """Preserve channel order when one engine chunk contains several events."""
++        self._ordered_choices = None
++        choice = self.process_output(engine_response)
++        if self._ordered_choices is not None:
++            return self._ordered_choices
++        if (
++            choice is not None
++            and self._structured_guided_json
++            and self.tool_call_parser is None
++            and self.reasoning_parser is not None
++            and isinstance(self.reasoning_parser.detector, Glm45Detector)
++            and "reasoning_content" in choice["delta"]
++            and "content" in choice["delta"]
++        ):
++            # The GLM reasoning gate precedes the constrained JSON response.
++            # Keep that order even when both arrive in a single worker batch.
++            delta = choice["delta"]
++            thought = {"reasoning_content": delta["reasoning_content"]}
++            if "role" in delta:
++                thought["role"] = delta["role"]
++            return [
++                {
++                    "index": choice["index"],
++                    "delta": thought,
++                    "finish_reason": None,
++                    "logprobs": None,
++                },
++                {
++                    **choice,
++                    "delta": {
++                        key: value
++                        for key, value in delta.items()
++                        if key not in {"role", "reasoning_content"}
++                    },
++                },
++            ]
++        return [choice] if choice is not None else []
+ 
+     def _strip_trailing_eos_token_ids(self, token_ids: list[int]) -> list[int]:
+         if not self._eos_token_ids:
+@@ -1501,6 +1638,9 @@
+                     "logprobs": self._take_pending_logprobs(),
+                 }
+             return None
++
++        if self._unified_parser is not None:
++            return self._process_unified_output(delta_text, finish_reason)
+ 
+         # -- Reasoning parsing --
+         reasoning_text = None
+diff --git a/components/src/dynamo/frontend/sglang_processor.py b/components/src/dynamo/frontend/sglang_processor.py
+--- a/components/src/dynamo/frontend/sglang_processor.py
++++ b/components/src/dynamo/frontend/sglang_processor.py
+@@ -651,6 +651,7 @@
+             sglang_tools=convert_tools(request.get("tools")),
+             tool_call_parser_name=self.tool_call_parser_name,
+             named_zero_arg_tool=pre.named_zero_arg_tool,
++            tool_choice=request.get("tool_choice", "auto"),
+             eos_token_ids=self.eos_token_ids,
+             prompt_token_ids=pre.prompt_token_ids,
+             stop_strings=_request_stop_strings(request),
+@@ -719,6 +720,7 @@
+             sglang_tools=convert_tools(request.get("tools")),
+             tool_call_parser_name=self.tool_call_parser_name,
+             named_zero_arg_tool=preproc_result.named_zero_arg_tool,
++            tool_choice=request.get("tool_choice", "auto"),
+             eos_token_ids=self.eos_token_ids,
+             prompt_token_ids=preproc_result.prompt_token_ids,
+             stop_strings=_request_stop_strings(request),
+@@ -784,7 +786,7 @@
+                 finish_reason: str | None,
+                 stop_reason: Any | None,
+                 engine_data: Any | None,
+-            ) -> dict[str, Any]:
++            ) -> list[dict[str, Any]]:
+                 nonlocal pending_token_ids
+                 nonlocal pending_text
+                 nonlocal pending_log_probs
+@@ -810,7 +812,8 @@
+                 if self.debug_perf:
+                     t_pp0 = time.monotonic()
+ 
+-                choice = post.process_output(mapped_response)
++                choices = post.process_outputs(mapped_response)
++                choice = choices[-1] if choices else None
+ 
+                 if post.locally_finished and pending_usage is None:
+                     pending_usage = {
+@@ -880,7 +883,19 @@
+                 pending_top_logprobs = None
+                 pending_usage = None
+                 first_chunk = False
+-                return envelope
++                # A worker batch may cross reasoning/tool/content boundaries.
++                # Emit those deltas in order; account for tokens and usage once.
++                envelopes = []
++                for prior_choice in choices[:-1]:
++                    prior_data = {
++                        key: value
++                        for key, value in envelope["data"].items()
++                        if key not in {"usage", "nvext"}
++                    }
++                    prior_data["choices"] = [prior_choice]
++                    envelopes.append({"_dynamo_annotated": True, "data": prior_data})
++                envelopes.append(envelope)
++                return envelopes
+ 
+             async for dynamo_response in dynamo_stream:
+                 if dynamo_response.is_error():
+@@ -922,12 +937,13 @@
+                         top_logprobs is not None,
+                     )
+                     if pending_logprob_shape != chunk_logprob_shape:
+-                        envelope = flush_pending(
++                        envelopes = flush_pending(
+                             finish_reason=None,
+                             stop_reason=None,
+                             engine_data=None,
+                         )
+-                        yield envelope
++                        for envelope in envelopes:
++                            yield envelope
+                         if post.locally_finished:
+                             break
+ 
+@@ -960,12 +976,13 @@
+                     1 if first_chunk or post.has_pending_stop_text else stream_interval
+                 )
+                 if finish_reason or len(pending_token_ids) >= flush_threshold:
+-                    envelope = flush_pending(
++                    envelopes = flush_pending(
+                         finish_reason=finish_reason,
+                         stop_reason=stop_reason,
+                         engine_data=engine_data,
+                     )
+-                    yield envelope
++                    for envelope in envelopes:
++                        yield envelope
+                     if post.locally_finished:
+                         break
+         except (HttpError, InvalidArgument, Unknown):
+diff --git a/components/src/dynamo/frontend/tests/test_sglang_processor_unit.py b/components/src/dynamo/frontend/tests/test_sglang_processor_unit.py
+--- a/components/src/dynamo/frontend/tests/test_sglang_processor_unit.py
++++ b/components/src/dynamo/frontend/tests/test_sglang_processor_unit.py
+@@ -4137,9 +4137,12 @@
+         mapped_responses = []
+ 
+         class RecordingPostProcessor:
+-            def process_output(self, response):
++            locally_finished = False
++            has_pending_stop_text = False
++
++            def process_outputs(self, response):
+                 mapped_responses.append(response)
+-                return None
++                return []
+ 
+         async def collect():
+             return [
+@@ -4380,6 +4383,390 @@
+ # ---------------------------------------------------------------------------
+ # SglangStreamingPostProcessor: reasoning parsing
+ # ---------------------------------------------------------------------------
++
++
++@pytest.mark.core
++class TestGlmStructuredResponse:
++    @pytest.mark.timeout(180)
++    @pytest.mark.parametrize("chunk_size", [1, 17, None])
++    def test_reasoning_before_constrained_json(self, chunk_size):
++        from _glm_grammar_checks import verify_glm_response_grammar
++
++        schema = {
++            "type": "object",
++            "properties": {
++                "location": {"type": "string", "enum": ["London", "New York"]},
++                "temperature": {"type": "number"},
++                "conditions": {"type": "string"},
++            },
++            "required": ["location", "temperature", "conditions"],
++            "additionalProperties": False,
++        }
++        reasoning = "Check London météo🙂 before answering; this is prose, not JSON."
++        prefix = reasoning + "</think>"
++        body = '{"location":"London","temperature":12,"conditions":"cloudy"}'
++        invalid_bodies = [
++            "[]",
++            '{"location":',
++            '{"location":"Tokyo","temperature":12,"conditions":"cloudy"}',
++            '{"location":"London"}',
++            (
++                '{"location":"London","temperature":12,"conditions":"cloudy",'
++                '"analysis":"leaked"}'
++            ),
++            '{"location":"London","temperature":"hot","conditions":"cloudy"}',
++        ]
++        proof = verify_glm_response_grammar(
++            schema, prefix + body, [prefix + value for value in invalid_bodies]
++        )
++        assert proof["rejected_checks"] == len(invalid_bodies)
++
++        tool_parser, reasoning_parser = create_parsers(
++            {},
++            tool_call_parser_name="glm47",
++            reasoning_parser_name="glm45",
++            force_reasoning=True,
++        )
++        post = SglangStreamingPostProcessor(
++            tokenizer=None,
++            tool_call_parser=tool_parser,
++            reasoning_parser=reasoning_parser,
++            tool_call_parser_name="glm47",
++            structured_guided_json=True,
++        )
++        text = prefix + body
++        step = chunk_size or len(text)
++        choices = []
++        for offset in range(0, len(text), step):
++            choices.extend(post.process_outputs({"text": text[offset : offset + step]}))
++        choices.extend(post.process_outputs({"text": "", "finish_reason": "stop"}))
++        assert (
++            "".join(choice["delta"].get("reasoning_content", "") for choice in choices)
++            == reasoning
++        )
++        assert "".join(choice["delta"].get("content", "") for choice in choices) == body
++        assert all(
++            not (
++                "reasoning_content" in choice["delta"] and "content" in choice["delta"]
++            )
++            for choice in choices
++        )
++        channels = [
++            key
++            for choice in choices
++            for key in choice["delta"]
++            if key in {"reasoning_content", "content"}
++        ]
++        first_content = channels.index("content")
++        assert all(key == "reasoning_content" for key in channels[:first_content])
++        assert all(key == "content" for key in channels[first_content:])
++        assert sum("role" in choice["delta"] for choice in choices) == 1
++        assert not any(choice["delta"].get("tool_calls") for choice in choices)
++        assert choices[-1]["finish_reason"] == "stop"
++
++
++class TestGlmToolCallRecovery:
++    def test_empty_tools_do_not_enable_tool_parsing(self):
++        parser, reasoning = create_parsers(
++            {"tools": []},
++            tool_call_parser_name="glm47",
++            reasoning_parser_name="glm45",
++        )
++        assert parser is None
++        post = SglangStreamingPostProcessor(
++            tokenizer=None,
++            tool_call_parser=parser,
++            reasoning_parser=reasoning,
++            tool_call_parser_name="glm47",
++        )
++        text = "<tool_call>run</tool_call>"
++        choices = post.process_outputs({"text": text, "finish_reason": "stop"})
++        assert "".join(choice["delta"].get("content", "") for choice in choices) == text
++        assert not any(choice["delta"].get("tool_calls") for choice in choices)
++        assert choices[-1]["finish_reason"] == "stop"
++
++    @pytest.mark.parametrize("chunk_size", [1, 17, None])
++    @pytest.mark.parametrize("named", [False, True])
++    def test_guided_arguments_preserve_number_precision(self, chunk_size, named):
++        tool_choice = (
++            {"type": "function", "function": {"name": "f"}} if named else "required"
++        )
++        request = {
++            "tools": [{"type": "function", "function": {"name": "f"}}],
++            "tool_choice": tool_choice,
++        }
++        tools = convert_tools(request["tools"])
++        parser, reasoning = create_parsers(
++            request, tool_call_parser_name="glm47", reasoning_parser_name="glm45"
++        )
++        post = SglangStreamingPostProcessor(
++            tokenizer=None,
++            tool_call_parser=parser,
++            reasoning_parser=reasoning,
++            sglang_tools=tools,
++            tool_call_parser_name="glm47",
++            tool_choice=tool_choice,
++        )
++        arguments = '{"x":9007199254740993.25}'
++        text = arguments if named else f'[{{"name":"f","parameters":{arguments}}}]'
++        step = chunk_size or len(text)
++        calls = []
++        for offset in range(0, len(text), step):
++            for choice in post.process_outputs({"text": text[offset : offset + step]}):
++                calls.extend(choice["delta"].get("tool_calls", []))
++        for choice in post.process_outputs({"text": "", "finish_reason": "stop"}):
++            calls.extend(choice["delta"].get("tool_calls", []))
++        assert "".join(call["function"]["arguments"] for call in calls) == arguments
++        assert [
++            call["function"]["name"] for call in calls if "name" in call["function"]
++        ] == ["f"]
++
++    @pytest.mark.parametrize("finish_reason", ["stop", "length"])
++    def test_stream_preserves_channel_order_and_accounts_once(self, finish_reason):
++        request = {
++            "model": "test-glm",
++            "tools": [{"type": "function", "function": {"name": "f"}}],
++        }
++        tools = convert_tools(request["tools"])
++        parser, reasoning = create_parsers(
++            request, tool_call_parser_name="glm47", reasoning_parser_name="glm45"
++        )
++        tokenizer = TestIncrementalDetokenization.ByteTokenizer()
++        post = SglangStreamingPostProcessor(
++            tokenizer=tokenizer,
++            tool_call_parser=parser,
++            reasoning_parser=reasoning,
++            sglang_tools=tools,
++            tool_call_parser_name="glm47",
++        )
++        text = "<think>A</think><tool_call>f</tool_call><think>B</think>done"
++        token_ids = list(text.encode())
++        usage = {"prompt_tokens": 3, "completion_tokens": len(token_ids)}
++        processor = SglangProcessor(
++            tokenizer=tokenizer,
++            routed_engine=FakeRoutedEngine(
++                items=[
++                    {
++                        "token_ids": token_ids,
++                        "text": text,
++                        "finish_reason": finish_reason,
++                        "completion_usage": usage,
++                        "log_probs": [-0.1] * len(token_ids),
++                    }
++                ]
++            ),
++            tool_call_parser_name="glm47",
++            reasoning_parser_name="glm45",
++            eos_token_ids=None,
++        )
++
++        async def collect():
++            return [
++                item
++                async for item in processor._generate_and_stream(
++                    "req-glm", request, {}, [1, 2, 3], post
++                )
++            ]
++
++        items = asyncio.run(collect())
++        choices = [item["data"]["choices"][0] for item in items]
++        channels = []
++        for choice in choices:
++            for key in ("reasoning_content", "tool_calls", "content"):
++                if key in choice["delta"] and (not channels or channels[-1] != key):
++                    channels.append(key)
++        assert channels == [
++            "reasoning_content",
++            "tool_calls",
++            "reasoning_content",
++            "content",
++        ]
++        assert choices[0]["delta"]["role"] == "assistant"
++        assert sum("role" in choice["delta"] for choice in choices) == 1
++        assert all(choice["finish_reason"] is None for choice in choices[:-1])
++        assert choices[-1]["finish_reason"] == (
++            "tool_calls" if finish_reason == "stop" else "length"
++        )
++        assert sum("usage" in item["data"] for item in items) == 1
++        assert items[-1]["data"]["usage"] == usage
++        assert sum("comment" in item for item in items) == 1
++        assert json.loads(items[-1]["comment"][0])["chunk_tokens"] == len(token_ids)
++        assert all(choice["logprobs"] is None for choice in choices[:-1])
++        assert len(choices[-1]["logprobs"]["content"]) == len(token_ids)
++
++    @pytest.mark.parametrize("chunk_size", [1, 31, None])
++    @pytest.mark.parametrize("separate_finish", [False, True])
++    def test_recovers_later_call_after_complete_first_call(
++        self, chunk_size, separate_finish
++    ):
++        request = {
++            "tools": [
++                {
++                    "type": "function",
++                    "function": {
++                        "name": "get_weather",
++                        "parameters": {
++                            "type": "object",
++                            "properties": {"city": {"type": "string"}},
++                        },
++                    },
++                }
++            ]
++        }
++        tools = convert_tools(request["tools"])
++        parser, _ = create_parsers(
++            request, tool_call_parser_name="glm47", reasoning_parser_name=None
++        )
++        post = SglangStreamingPostProcessor(
++            tokenizer=None,
++            tool_call_parser=parser,
++            reasoning_parser=None,
++            sglang_tools=tools,
++            tool_call_parser_name="glm47",
++        )
++        text = (
++            "\n"
++            + "\n\n".join(
++                f"<tool_call>get_weather<arg_key>city</arg_key>"
++                f"<arg_value>{city}</arg_value></tool_call>"
++                for city in ("Paris", "Tokyo")
++            )
++            + "\n"
++        )
++        step = chunk_size or len(text)
++        chunks = [text[offset : offset + step] for offset in range(0, len(text), step)]
++        if separate_finish:
++            chunks.append("")
++        calls = []
++        for index, chunk in enumerate(chunks):
++            choice = post.process_output(
++                {
++                    "text": chunk,
++                    "token_ids": [],
++                    "finish_reason": "stop" if index == len(chunks) - 1 else None,
++                }
++            )
++            if choice:
++                calls.extend(choice["delta"].get("tool_calls", []))
++        names = [call for call in calls if "name" in call["function"]]
++        assert [call["index"] for call in names] == [0, 1]
++        assert len({call["id"] for call in names}) == 2
++        assert [call["function"]["name"] for call in names] == ["get_weather"] * 2
++        assert [
++            json.loads(
++                "".join(
++                    call["function"]["arguments"]
++                    for call in calls
++                    if call["index"] == index
++                )
++            )
++            for index in (0, 1)
++        ] == [
++            {"city": "Paris"},
++            {"city": "Tokyo"},
++        ]
++
++    @pytest.mark.parametrize("chunk_size", [1, 17, None])
++    @pytest.mark.parametrize(
++        ("text", "schema", "expected_content", "expected_reasoning", "expected_args"),
++        [
++            (
++                (
++                    "<think>A</think><tool_call>f<arg_key>x</arg_key>"
++                    "<arg_value>one</arg_value></tool_call><think>B</think>done"
++                ),
++                {"type": "string"},
++                "done",
++                "AB",
++                '{"x":"one"}',
++            ),
++            (
++                (
++                    "<tool_call>f<arg_key>x</arg_key>"
++                    "<arg_value><think>literal</think></arg_value></tool_call>"
++                ),
++                {"type": "string"},
++                "",
++                "",
++                '{"x":"<think>literal</think>"}',
++            ),
++            (
++                (
++                    "<tool_call>f<arg_key>x</arg_key>"
++                    "<arg_value>null</arg_value></tool_call>"
++                ),
++                {"type": "string", "nullable": True},
++                "",
++                "",
++                '{"x":null}',
++            ),
++            (
++                (
++                    "<tool_call>f<arg_key>x</arg_key>"
++                    "<arg_value>9007199254740993.25</arg_value></tool_call>"
++                ),
++                {"type": "number"},
++                "",
++                "",
++                '{"x":9007199254740993.25}',
++            ),
++        ],
++    )
++    def test_glm_channels_and_typed_arguments_survive_chunk_boundaries(
++        self,
++        chunk_size,
++        text,
++        schema,
++        expected_content,
++        expected_reasoning,
++        expected_args,
++    ):
++        request = {
++            "tools": [
++                {
++                    "type": "function",
++                    "function": {
++                        "name": "f",
++                        "parameters": {
++                            "type": "object",
++                            "properties": {"x": schema},
++                        },
++                    },
++                }
++            ]
++        }
++        tools = convert_tools(request["tools"])
++        parser, reasoning = create_parsers(
++            request, tool_call_parser_name="glm47", reasoning_parser_name="glm45"
++        )
++        post = SglangStreamingPostProcessor(
++            tokenizer=None,
++            tool_call_parser=parser,
++            reasoning_parser=reasoning,
++            sglang_tools=tools,
++            tool_call_parser_name="glm47",
++        )
++        step = chunk_size or len(text)
++        chunks = [text[offset : offset + step] for offset in range(0, len(text), step)]
++        choices = [
++            post.process_output({"text": chunk, "token_ids": []}) for chunk in chunks
++        ]
++        choices.append(
++            post.process_output({"text": "", "token_ids": [], "finish_reason": "stop"})
++        )
++        deltas = [choice["delta"] for choice in choices if choice]
++        assert "".join(delta.get("content", "") for delta in deltas) == expected_content
++        assert (
++            "".join(delta.get("reasoning_content", "") for delta in deltas)
++            == expected_reasoning
++        )
++        arguments = "".join(
++            call["function"].get("arguments", "")
++            for delta in deltas
++            for call in delta.get("tool_calls", [])
++        )
++        assert arguments == expected_args
++        assert choices[-1]["finish_reason"] == "tool_calls"
+ 
+ 
+ class TestReasoningParsing:  # FRONTEND.9 — reasoning ↔ tool-call orchestration
+diff --git a/components/src/dynamo/frontend/tests/_glm_grammar_checks.py b/components/src/dynamo/frontend/tests/_glm_grammar_checks.py
+new file mode 100644
+--- /dev/null
++++ b/components/src/dynamo/frontend/tests/_glm_grammar_checks.py
+@@ -0,0 +1,113 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++# SPDX-License-Identifier: Apache-2.0
++
++"""CPU checks for the SGLang reasoning gate and response JSON grammar.
++
++The byte vocabulary is a deterministic test tokenizer, not a model tokenizer.
++The frontend projection, worker projection, grammar compiler and reasoning gate
++are the production implementations.
++"""
++
++import json
++
++
++def compile_glm_response_grammar(schema):
++    import xgrammar as xgr
++    from sglang.srt.constrained.reasoner_grammar_backend import ReasonerGrammarBackend
++    from sglang.srt.constrained.xgrammar_backend import XGrammarGrammarBackend
++    from sglang.srt.parser.reasoning_parser import ReasoningParser
++
++    from dynamo.frontend.sglang_prepost import (
++        _guided_output_requires_reasoning,
++        build_response_format_guided_decoding,
++    )
++    from dynamo.frontend.sglang_processor import _build_dynamo_preproc
++    from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
++
++    class ByteTokenizer:
++        def encode(self, text, **kwargs):
++            return list(text.encode("utf-8"))
++
++        def decode(self, token_ids, **kwargs):
++            return bytes(token_ids).decode("utf-8", errors="replace")
++
++        def init_xgrammar(self):
++            return (
++                xgr.TokenizerInfo(
++                    [bytes([index]) for index in range(256)] + [b"<eos>"],
++                    stop_token_ids=[256],
++                ),
++                None,
++            )
++
++    request = {
++        "model": "test-glm",
++        "response_format": {
++            "type": "json_schema",
++            "json_schema": {"name": "weather", "strict": True, "schema": schema},
++        },
++    }
++    guided = build_response_format_guided_decoding(request)
++    require_reasoning = _guided_output_requires_reasoning(request, True, "glm45")
++    assert require_reasoning is True
++    preproc = _build_dynamo_preproc(
++        request,
++        [],
++        request["model"],
++        [256],
++        guided,
++        require_reasoning=require_reasoning,
++    )
++    sampling = BaseWorkerHandler._get_guided_decoding_params(
++        preproc["sampling_options"]["guided_decoding"]
++    )
++    assert json.loads(sampling["json_schema"]) == schema
++    tokenizer = ByteTokenizer()
++    backend = ReasonerGrammarBackend(
++        XGrammarGrammarBackend(tokenizer, 257, [256]),
++        ReasoningParser("glm45", stream_reasoning=True, force_reasoning=True),
++        tokenizer,
++    )
++    grammar = backend._init_value_dispatch(
++        ("json", sampling["json_schema"]), preproc["require_reasoning"]
++    )
++    assert grammar is not None
++    return grammar, tokenizer, preproc
++
++
++def accepts_glm_response(grammar, tokenizer, chunks):
++    """Require both acceptance of every token and a legal terminal EOS."""
++    candidate = grammar.copy()
++    for chunk in chunks:
++        for token_id in tokenizer.encode(chunk):
++            if candidate.is_terminated():
++                return False
++            try:
++                candidate.accept_token(token_id)
++            except ValueError:
++                return False
++    try:
++        candidate.accept_token(256)
++    except ValueError:
++        return False
++    return candidate.is_terminated()
++
++
++def verify_glm_response_grammar(schema, accepted, rejected):
++    """Check the authored Unicode response at every character split."""
++    grammar, tokenizer, preproc = compile_glm_response_grammar(schema)
++    assert accepts_glm_response(grammar, tokenizer, [accepted])
++    for split in range(len(accepted) + 1):
++        assert accepts_glm_response(
++            grammar, tokenizer, [accepted[:split], accepted[split:]]
++        ), f"grammar rejected character split {split}"
++    for index, text in enumerate(rejected):
++        assert not accepts_glm_response(
++            grammar, tokenizer, [text]
++        ), f"grammar accepted invalid probe {index}"
++    return {
++        "accepted_checks": len(accepted) + 2,
++        "rejected_checks": len(rejected),
++        "require_reasoning": preproc["require_reasoning"],
++        "tokenizer": "deterministic UTF-8 byte vocabulary; no model weights",
++    }
+diff --git a/lib/bindings/python/Cargo.toml b/lib/bindings/python/Cargo.toml
+--- a/lib/bindings/python/Cargo.toml
++++ b/lib/bindings/python/Cargo.toml
+@@ -61,6 +61,7 @@
+ dynamo-runtime = { path = "../../runtime" }
+ dynamo-mocker = { path = "../../mocker" }
+ dynamo-parsers = { version = "8.1.0" }
++dynamo-parsers-v2 = { version = "=0.10.7" }
+ dynamo-backend-common = { path = "../../backend-common" }
+ dynamo-sidecar-common = { path = "../../sidecar/common" }
+ dynamo-sglang-sidecar = { path = "../../sidecar/sglang" }
+diff --git a/lib/bindings/python/Cargo.lock b/lib/bindings/python/Cargo.lock
+--- a/lib/bindings/python/Cargo.lock
++++ b/lib/bindings/python/Cargo.lock
+@@ -1135,6 +1135,12 @@
+ ]
+ 
+ [[package]]
++name = "borrow-or-share"
++version = "0.2.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "dc0b364ead1874514c8c2855ab558056ebfeb775653e7ae45ff72f28f8f3166c"
++
++[[package]]
+ name = "bs58"
+ version = "0.5.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -1176,6 +1182,12 @@
+ version = "3.20.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
++
++[[package]]
++name = "bytecount"
++version = "0.6.9"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "175812e0be2bccb6abe50bb8d566126198344f707e304f45c648fd8f2cc0365e"
+ 
+ [[package]]
+ name = "bytemuck"
+@@ -2193,7 +2205,7 @@
+  "dynamo-memory",
+  "dynamo-mocker",
+  "dynamo-parsers",
+- "dynamo-parsers-v2",
++ "dynamo-parsers-v2 0.3.2",
+  "dynamo-protocols",
+  "dynamo-renderer",
+  "dynamo-rl",
+@@ -2353,6 +2365,25 @@
+ ]
+ 
+ [[package]]
++name = "dynamo-parsers-v2"
++version = "0.10.7"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "94251f10856a6ba46e1c5455738efbf8993ba5ebd375b053cad6b01c5f785e41"
++dependencies = [
++ "anyhow",
++ "dynamo-structural-tag",
++ "openai-harmony",
++ "percent-encoding",
++ "regex",
++ "serde",
++ "serde_json",
++ "serde_yaml",
++ "sha2 0.10.9",
++ "tracing",
++ "uuid",
++]
++
++[[package]]
+ name = "dynamo-protocols"
+ version = "5.4.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -2385,6 +2416,7 @@
+  "dynamo-llm",
+  "dynamo-mocker",
+  "dynamo-parsers",
++ "dynamo-parsers-v2 0.10.7",
+  "dynamo-runtime",
+  "dynamo-sglang-sidecar",
+  "dynamo-sidecar-common",
+@@ -2558,6 +2590,19 @@
+ ]
+ 
+ [[package]]
++name = "dynamo-structural-tag"
++version = "0.1.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "8350d3089f5f140c6f8dfcdbdf77b2c1e97b0bcc1b67b4d32a06a41426ea7085"
++dependencies = [
++ "anyhow",
++ "jsonschema",
++ "regex",
++ "serde",
++ "serde_json",
++]
++
++[[package]]
+ name = "dynamo-tokenizers"
+ version = "1.8.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -2695,6 +2740,15 @@
+ ]
+ 
+ [[package]]
++name = "email_address"
++version = "0.2.9"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e079f19b08ca6239f47f8ba8509c11cf3ea30095831f7fed61441475edd8c449"
++dependencies = [
++ "serde",
++]
++
++[[package]]
+ name = "encode_unicode"
+ version = "1.0.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -2858,6 +2912,17 @@
+ 
+ [[package]]
+ name = "fancy-regex"
++version = "0.14.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6e24cb5a94bcae1e5408b0effca5cd7172ea3c5755049c5f3af4cd283a165298"
++dependencies = [
++ "bit-set 0.8.0",
++ "regex-automata",
++ "regex-syntax",
++]
++
++[[package]]
++name = "fancy-regex"
+ version = "0.17.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "72cf461f865c862bb7dc573f643dd6a2b6842f7c30b07882b56bd148cc2761b8"
+@@ -3020,6 +3085,17 @@
+ ]
+ 
+ [[package]]
++name = "fluent-uri"
++version = "0.3.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1918b65d96df47d3591bed19c5cca17e3fa5d0707318e4b5ef2eae01764df7e5"
++dependencies = [
++ "borrow-or-share",
++ "ref-cast",
++ "serde",
++]
++
++[[package]]
+ name = "flume"
+ version = "0.12.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -3056,6 +3132,16 @@
+ checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+ dependencies = [
+  "percent-encoding",
++]
++
++[[package]]
++name = "fraction"
++version = "0.15.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e076045bb43dac435333ed5f04caf35c7463631d0dae2deb2638d94dd0a5b872"
++dependencies = [
++ "lazy_static",
++ "num",
+ ]
+ 
+ [[package]]
+@@ -4373,6 +4459,30 @@
+ ]
+ 
+ [[package]]
++name = "jsonschema"
++version = "0.29.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "161c33c3ec738cfea3288c5c53dfcdb32fd4fc2954de86ea06f71b5a1a40bfcd"
++dependencies = [
++ "ahash",
++ "base64 0.22.1",
++ "bytecount",
++ "email_address",
++ "fancy-regex 0.14.0",
++ "fraction",
++ "idna",
++ "itoa",
++ "num-cmp",
++ "once_cell",
++ "percent-encoding",
++ "referencing",
++ "regex-syntax",
++ "serde",
++ "serde_json",
++ "uuid-simd",
++]
++
++[[package]]
+ name = "jwalk"
+ version = "0.8.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -5296,6 +5406,7 @@
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "35bd024e8b2ff75562e5f34e7f4905839deb4b22955ef5e73d2fea1b9813cb23"
+ dependencies = [
++ "num-bigint",
+  "num-complex",
+  "num-integer",
+  "num-iter",
+@@ -5312,6 +5423,12 @@
+  "num-integer",
+  "num-traits",
+ ]
++
++[[package]]
++name = "num-cmp"
++version = "0.1.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "63335b2e2c34fae2fb0aa2cecfd9f0832a1e24b3b32ecec612c3426d46dc8aaa"
+ 
+ [[package]]
+ name = "num-complex"
+@@ -6915,6 +7032,20 @@
+ ]
+ 
+ [[package]]
++name = "referencing"
++version = "0.29.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "40a64b3a635fad9000648b4d8a59c8710c523ab61a23d392a7d91d47683f5adc"
++dependencies = [
++ "ahash",
++ "fluent-uri",
++ "once_cell",
++ "parking_lot",
++ "percent-encoding",
++ "serde_json",
++]
++
++[[package]]
+ name = "regex"
+ version = "1.12.4"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -9316,6 +9447,17 @@
+ ]
+ 
+ [[package]]
++name = "uuid-simd"
++version = "0.8.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "23b082222b4f6619906941c17eb2297fff4c2fb96cb60164170522942a200bd8"
++dependencies = [
++ "outref",
++ "uuid",
++ "vsimd",
++]
++
++[[package]]
+ name = "v_frame"
+ version = "0.3.9"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+diff --git a/lib/bindings/python/rust/lib.rs b/lib/bindings/python/rust/lib.rs
+--- a/lib/bindings/python/rust/lib.rs
++++ b/lib/bindings/python/rust/lib.rs
+@@ -89,6 +89,7 @@
+ mod prometheus_metrics;
+ mod push_egress;
+ mod python_payload;
++mod unified_chat_parser;
+ 
+ type PythonServerStreamingIngress = Ingress<
+     SingleIn<python_payload::PythonPayload>,
+@@ -282,6 +283,7 @@
+     push_egress::add_to_module(m)?;
+     errors::register_exceptions(m)?;
+     parsers::add_to_module(m)?;
++    m.add_class::<unified_chat_parser::UnifiedChatParser>()?;
+     backend::add_to_module(m)?;
+ 
+     m.add_class::<prometheus_metrics::RuntimeMetrics>()?;
+diff --git a/lib/bindings/python/rust/unified_chat_parser.rs b/lib/bindings/python/rust/unified_chat_parser.rs
+new file mode 100644
+--- /dev/null
++++ b/lib/bindings/python/rust/unified_chat_parser.rs
+@@ -0,0 +1,96 @@
++// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++// SPDX-License-Identifier: Apache-2.0
++
++use dynamo_parsers_v2::Tool;
++use dynamo_parsers_v2::unified::{
++    InvalidGuidedPayloadPolicy, UnifiedParser, UnifiedParserEvent, UnifiedParserExt,
++    UnifiedParserInit, UnifiedParserStartingState, UnifiedToolOutputMode,
++    create_unified_parser_for_family,
++};
++use pyo3::exceptions::PyValueError;
++use pyo3::prelude::*;
++use serde_json::{Value, json};
++
++/// One request owns one parser for reasoning, visible text and tool arguments.
++#[pyclass(unsendable)]
++pub struct UnifiedChatParser {
++    parser: Box<dyn UnifiedParser>,
++    finished: bool,
++}
++
++#[pymethods]
++impl UnifiedChatParser {
++    #[new]
++    #[pyo3(signature = (tools_json, starting_state="None", guided=false, named_tool=None))]
++    fn new(
++        tools_json: &str,
++        starting_state: &str,
++        guided: bool,
++        named_tool: Option<String>,
++    ) -> PyResult<Self> {
++        let tools: Vec<Tool> =
++            serde_json::from_str(tools_json).map_err(|e| PyValueError::new_err(e.to_string()))?;
++        let starting_state = match starting_state {
++            "None" => UnifiedParserStartingState::None,
++            "Reasoning" => UnifiedParserStartingState::Reasoning,
++            "Response" => UnifiedParserStartingState::Response,
++            _ => return Err(PyValueError::new_err("invalid parser starting state")),
++        };
++        let mut parser = create_unified_parser_for_family("glm47", &tools)
++            .map_err(|e| PyValueError::new_err(e.to_string()))?;
++        parser
++            .initialize_request(UnifiedParserInit {
++                starting_state,
++                tool_output_mode: if guided {
++                    UnifiedToolOutputMode::GuidedJson { named_tool }
++                } else {
++                    UnifiedToolOutputMode::Native
++                },
++                invalid_guided_payload: InvalidGuidedPayloadPolicy::RecoverAsText,
++                ..Default::default()
++            })
++            .map_err(|e| PyValueError::new_err(e.to_string()))?;
++        Ok(Self {
++            parser,
++            finished: false,
++        })
++    }
++
++    /// Return ordered deltas; arguments remain raw JSON strings across the FFI.
++    fn advance(&mut self, text: &str, finish: bool) -> PyResult<String> {
++        if self.finished {
++            if text.is_empty() {
++                return Ok("[]".into());
++            }
++            return Err(PyValueError::new_err("parser already finished"));
++        }
++        let mut events = self
++            .parser
++            .push(text)
++            .map_err(|e| PyValueError::new_err(e.to_string()))?;
++        if finish {
++            events.extend(
++                self.parser
++                    .finish()
++                    .map_err(|e| PyValueError::new_err(e.to_string()))?
++                    .events,
++            );
++            self.finished = true;
++        }
++        let events: Vec<Value> = events
++            .into_iter()
++            .map(|event| match event {
++                UnifiedParserEvent::Text(text) => json!({"kind": "text", "text": text}),
++                UnifiedParserEvent::Reasoning(text) => json!({"kind": "reasoning", "text": text}),
++                UnifiedParserEvent::ToolCall(call) => json!({
++                    "kind": "tool_call", "index": call.tool_index,
++                    "name": call.name, "arguments": call.arguments, "complete": call.complete,
++                }),
++                UnifiedParserEvent::MessageStart(_) | UnifiedParserEvent::MessageEnd => {
++                    unreachable!("GLM has no message-phase events")
++                }
++            })
++            .collect();
++        serde_json::to_string(&events).map_err(|e| PyValueError::new_err(e.to_string()))
++    }
++}
+diff --git a/lib/bindings/python/src/dynamo/_core.pyi b/lib/bindings/python/src/dynamo/_core.pyi
+--- a/lib/bindings/python/src/dynamo/_core.pyi
++++ b/lib/bindings/python/src/dynamo/_core.pyi
+@@ -37,6 +37,21 @@
+ def get_reasoning_parser_names() -> list[str]:
+     """Get list of available reasoning parser names."""
+     ...
++
++class UnifiedChatParser:
++    """Request-scoped unified GLM reasoning, content and tool parser."""
++
++    def __init__(
++        self,
++        tools_json: str,
++        starting_state: str = "None",
++        guided: bool = False,
++        named_tool: str | None = None,
++    ) -> None: ...
++
++    def advance(self, text: str, finish: bool) -> str:
++        """Return JSON-encoded deltas, preserving raw argument JSON."""
++        ...
+ 
+ def run_kv_indexer(args: List[str]) -> None:
+     """Run the KV indexer with the given arguments."""
+diff --git a/lib/bindings/python/src/dynamo/_internal/__init__.py b/lib/bindings/python/src/dynamo/_internal/__init__.py
+--- a/lib/bindings/python/src/dynamo/_internal/__init__.py
++++ b/lib/bindings/python/src/dynamo/_internal/__init__.py
+@@ -12,7 +12,9 @@
+ 
+ # Re-export from _core
+ from dynamo._core import ModelDeploymentCard as ModelDeploymentCard
++from dynamo._core import UnifiedChatParser as UnifiedChatParser
+ 
+ __all__ = [
+     "ModelDeploymentCard",
++    "UnifiedChatParser",
+ ]
+diff --git a/lib/bindings/python/src/dynamo/_internal/__init__.pyi b/lib/bindings/python/src/dynamo/_internal/__init__.pyi
+--- a/lib/bindings/python/src/dynamo/_internal/__init__.pyi
++++ b/lib/bindings/python/src/dynamo/_internal/__init__.pyi
+@@ -3,7 +3,9 @@
+ 
+ # Type stubs - re-export from _core
+ from dynamo._core import ModelDeploymentCard as ModelDeploymentCard
++from dynamo._core import UnifiedChatParser as UnifiedChatParser
+ 
+ __all__ = [
+     "ModelDeploymentCard",
++    "UnifiedChatParser",
+ ]
