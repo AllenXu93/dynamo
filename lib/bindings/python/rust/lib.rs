@@ -95,6 +95,7 @@ mod planner;
 mod prometheus_metrics;
 mod push_egress;
 mod python_payload;
+mod unified_chat_parser;
 
 type PythonServerStreamingIngress = Ingress<
     SingleIn<python_payload::PythonPayload>,
@@ -455,6 +456,7 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     push_egress::add_to_module(m)?;
     errors::register_exceptions(m)?;
     parsers::add_to_module(m)?;
+    m.add_class::<unified_chat_parser::UnifiedChatParser>()?;
     backend::add_to_module(m)?;
 
     m.add_class::<prometheus_metrics::RuntimeMetrics>()?;

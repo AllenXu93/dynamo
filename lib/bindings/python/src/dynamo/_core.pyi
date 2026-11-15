@@ -45,6 +45,22 @@ def get_structural_tag_parser_names() -> list[str]:
     """Get selectable parser names with registered structural-tag builders."""
     ...
 
+class UnifiedChatParser:
+    """Internal request-scoped GLM reasoning, text and tool parser."""
+
+    def __init__(
+        self,
+        tools_json: str,
+        starting_state: str = "None",
+        guided: bool = False,
+        named_tool: str | None = None,
+        constrained: bool = False,
+    ) -> None: ...
+
+    def advance(self, text: str, finish: bool) -> str:
+        """Return ordered JSON deltas with raw JSON argument strings."""
+        ...
+
 def run_kv_indexer(args: List[str]) -> None:
     """Run the KV indexer with the given arguments."""
     ...

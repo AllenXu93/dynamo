@@ -12,7 +12,9 @@ For public APIs, use dynamo.runtime and dynamo.llm.
 
 # Re-export from _core
 from dynamo._core import ModelDeploymentCard as ModelDeploymentCard
+from dynamo._core import UnifiedChatParser as UnifiedChatParser
 
 __all__ = [
     "ModelDeploymentCard",
+    "UnifiedChatParser",
 ]

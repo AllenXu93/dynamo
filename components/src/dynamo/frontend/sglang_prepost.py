@@ -22,9 +22,14 @@ from sglang.srt.function_call.core_types import ToolCallItem
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.json_array_parser import JsonArrayParser
 from sglang.srt.function_call.utils import get_json_schema_constraint
-from sglang.srt.parser.reasoning_parser import GptOssDetector, ReasoningParser
+from sglang.srt.parser.reasoning_parser import (
+    Glm45Detector,
+    GptOssDetector,
+    ReasoningParser,
+)
 from xgrammar import StructuralTag, StructuralTagItem
 
+from dynamo._internal import UnifiedChatParser
 from dynamo.common.utils.engine_response import trailing_stop_prefix_len
 from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.llm.exceptions import InvalidArgument
@@ -1089,6 +1094,9 @@ class SglangStreamingPostProcessor:
         stop_token_ids: set[int] | None = None,
         skip_special_tokens: bool | None = None,
         guided_json_is_content: bool = False,
+        tool_choice: str | dict[str, Any] = "auto",
+        parser_starting_state: str | None = None,
+        constrained: bool = False,
     ) -> None:
         self.tokenizer = tokenizer
         self.tool_call_parser = tool_call_parser
@@ -1174,6 +1182,111 @@ class SglangStreamingPostProcessor:
         self._tool_call_args: dict[int, list[str]] = {}  # tool_index -> arg chunks
         # Full text accumulator for robust finish-time re-parse.
         self._tool_text_parts: list[str] = []
+        self._unified_parser = None
+        self._ordered_choices: list[dict[str, Any]] | None = None
+        if (
+            self._tool_call_parser_name == "glm47"
+            and not constrained
+            and tool_call_parser is not None
+            and (
+                reasoning_parser is None
+                or isinstance(reasoning_parser.detector, Glm45Detector)
+            )
+        ):
+            starting_state = parser_starting_state
+            if starting_state is None:
+                if reasoning_parser is None:
+                    starting_state = "Response"
+                elif reasoning_parser.detector.force_reasoning:
+                    starting_state = "Reasoning"
+                else:
+                    starting_state = "None"
+            self._unified_parser = UnifiedChatParser(
+                json.dumps([tool.function.model_dump() for tool in self._sglang_tools]),
+                starting_state=starting_state,
+                guided=self._is_json_array_parser,
+                constrained=constrained,
+                named_tool=(
+                    tool_choice["function"]["name"]
+                    if _is_named_tool_choice(tool_choice)
+                    else None
+                ),
+            )
+
+    def _process_unified_output(
+        self, text: str, finish_reason: str | None
+    ) -> dict[str, Any] | None:
+        events = json.loads(
+            self._unified_parser.advance(text, finish_reason is not None)
+        )
+        content = []
+        reasoning = []
+        calls = []
+        for event in events:
+            if event["kind"] == "text":
+                content.append(event["text"])
+            elif event["kind"] == "reasoning":
+                reasoning.append(event["text"])
+            else:
+                index = event["index"]
+                function = {"arguments": event["arguments"]}
+                call: dict[str, Any] = {"index": index, "function": function}
+                if event["name"] is not None:
+                    self._tool_call_names[index] = event["name"]
+                    function["name"] = event["name"]
+                    call["id"] = self._tool_call_id(event["name"], index)
+                    call["type"] = "function"
+                calls.append(call)
+        delta: dict[str, Any] = {}
+        if content:
+            delta["content"] = "".join(content)
+        if reasoning:
+            delta["reasoning_content"] = "".join(reasoning)
+        if calls:
+            delta["tool_calls"] = calls
+        if finish_reason == "stop" and self._tool_call_names:
+            finish_reason = "tool_calls"
+        if not delta and finish_reason is None:
+            return None
+        choice = {
+            "index": 0,
+            "delta": self._with_initial_role(delta),
+            "finish_reason": finish_reason,
+            "logprobs": self._take_pending_logprobs(),
+        }
+        ordered = []
+        call_events = iter(calls)
+        for event in events:
+            event_delta: dict[str, Any]
+            if event["kind"] in {"text", "reasoning"}:
+                key = "content" if event["kind"] == "text" else "reasoning_content"
+                event_delta = {key: event["text"]}
+            else:
+                event_delta = {"tool_calls": [next(call_events)]}
+            ordered.append(
+                {
+                    "index": 0,
+                    "delta": event_delta,
+                    "finish_reason": None,
+                    "logprobs": None,
+                }
+            )
+        if not ordered:
+            ordered.append({"index": 0, "delta": {}, "finish_reason": None})
+        if "role" in choice["delta"]:
+            ordered[0]["delta"]["role"] = choice["delta"]["role"]
+        ordered[-1]["finish_reason"] = finish_reason
+        ordered[-1]["logprobs"] = choice["logprobs"]
+        self._ordered_choices = ordered
+        return choice
+
+    def process_outputs(self, engine_response: dict[str, Any]) -> list[dict[str, Any]]:
+        """Preserve channel order when one engine chunk contains several events."""
+        self._ordered_choices = None
+        choice = self.process_output(engine_response)
+        if self._ordered_choices is not None:
+            return self._ordered_choices
+        return [choice] if choice is not None else []
 
     def _strip_matched_stop_token_ids(
         self, token_ids: list[int], stop_reason: Any
@@ -1631,6 +1744,9 @@ class SglangStreamingPostProcessor:
                     "logprobs": self._take_pending_logprobs(),
                 }
             return None
+
+        if self._unified_parser is not None:
+            return self._process_unified_output(delta_text, finish_reason)
 
         # -- Reasoning parsing --
         reasoning_text = None

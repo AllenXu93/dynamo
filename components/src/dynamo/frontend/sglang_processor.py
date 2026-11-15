@@ -713,6 +713,19 @@ class SglangProcessor:
             tool_call_parser_name=self.tool_call_parser_name,
             named_zero_arg_tool=named_zero_arg_tool,
             guided_json_is_content=_guided_json_is_content(dynamo_preproc),
+            tool_choice=request.get("tool_choice", "auto"),
+            parser_starting_state=(
+                "Response"
+                if reasoning_parser is None
+                else "Reasoning"
+                if reasoning_parser.detector.force_reasoning
+                else "None"
+            ),
+            constrained=bool(
+                (dynamo_preproc["sampling_options"].get("guided_decoding") or {}).get(
+                    "structural_tag"
+                )
+            ),
             eos_token_ids=self.eos_token_ids,
             prompt_token_ids=prompt_token_ids,
             stop_strings=_request_stop_strings(request),
@@ -916,7 +929,7 @@ class SglangProcessor:
                 stop_reason: Any | None,
                 stop_terminated: bool,
                 engine_data: Any | None,
-            ) -> dict[str, Any]:
+            ) -> list[dict[str, Any]]:
                 nonlocal pending_token_ids
                 nonlocal pending_log_probs
                 nonlocal pending_top_logprobs
@@ -941,7 +954,8 @@ class SglangProcessor:
                 if self.debug_perf:
                     t_pp0 = time.monotonic()
 
-                choice = post.process_output(mapped_response)
+                choices = post.process_outputs(mapped_response)
+                choice = choices[-1] if choices else None
                 if include_completion_ids:
                     completion_ids.extend(pending_token_ids)
                     if post.locally_finished:
@@ -1031,7 +1045,19 @@ class SglangProcessor:
                 pending_log_probs = None
                 pending_top_logprobs = None
                 first_chunk = False
-                return envelope
+                # Metadata and token accounting belong to the final frame only.
+                envelopes = []
+                for prior_choice in choices[:-1]:
+                    prior_data = {
+                        key: value
+                        for key, value in envelope["data"].items()
+                        if key
+                        not in {"usage", "nvext", "llm_metrics", "prompt_logprobs"}
+                    }
+                    prior_data["choices"] = [prior_choice]
+                    envelopes.append({"_dynamo_annotated": True, "data": prior_data})
+                envelopes.append(envelope)
+                return envelopes
 
             def finalize_terminal(terminal: dict[str, Any]) -> dict[str, Any]:
                 data = terminal["data"]
@@ -1125,7 +1151,7 @@ class SglangProcessor:
                         top_logprobs is not None,
                     )
                     if pending_logprob_shape != chunk_logprob_shape:
-                        envelope = flush_pending(
+                        envelopes = flush_pending(
                             finish_reason=None,
                             stop_reason=None,
                             stop_terminated=False,
@@ -1136,9 +1162,12 @@ class SglangProcessor:
                             and prompt_logprobs.needs_payload
                             and not backend_finished
                         ):
-                            pending_terminal = envelope
+                            for envelope in envelopes[:-1]:
+                                yield envelope
+                            pending_terminal = envelopes[-1]
                             continue
-                        yield envelope
+                        for envelope in envelopes:
+                            yield envelope
                         if post.locally_finished:
                             break
 
@@ -1165,7 +1194,7 @@ class SglangProcessor:
                     1 if first_chunk or post.has_pending_stop_text else stream_interval
                 )
                 if finish_reason or len(pending_token_ids) >= flush_threshold:
-                    envelope = flush_pending(
+                    envelopes = flush_pending(
                         finish_reason=finish_reason,
                         stop_reason=stop_reason,
                         stop_terminated=stop_terminated,
@@ -1177,9 +1206,12 @@ class SglangProcessor:
                         and not backend_finished
                     ):
                         # Preserve terminal metadata without emitting post-stop text.
-                        pending_terminal = envelope
+                        for envelope in envelopes[:-1]:
+                            yield envelope
+                        pending_terminal = envelopes[-1]
                         continue
-                    yield envelope
+                    for envelope in envelopes:
+                        yield envelope
                     if post.locally_finished:
                         break
             else:
